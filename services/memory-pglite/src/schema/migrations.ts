@@ -1,5 +1,6 @@
 import type { MemoryPgliteDatabase } from "../database/index.js";
 import { initialSchemaMigration } from "../migrations/001_initial_schema.js";
+import { recentContextSourcesMigration } from "../migrations/002_recent_context_sources.js";
 import {
   ACTIVE_SCHEMA_CONFIG_KEY,
   EMBEDDING_CONFIG_KEY,
@@ -13,7 +14,7 @@ import type {
   MigrationRunnerResult,
 } from "./migration-types.js";
 
-const MIGRATIONS: MigrationFactory[] = [initialSchemaMigration];
+const MIGRATIONS: MigrationFactory[] = [initialSchemaMigration, recentContextSourcesMigration];
 
 export interface RunMigrationsOptions {
   embeddingDimensions: number;

@@ -189,13 +189,13 @@ actor MemoryService {
         if reason.contains("terminal") || context.contains("terminal") {
             return .terminal
         }
-        if reason.contains("file") || context.contains("file") {
+        if reason.contains("file") || context.contains("file") || context.contains("document") {
             return .file
         }
         if reason.contains("repo") || context.contains("code") {
             return .repo
         }
-        if reason.contains("app") {
+        if reason.contains("app") || context.contains("meeting") || metadata.appName != nil {
             return .app
         }
 

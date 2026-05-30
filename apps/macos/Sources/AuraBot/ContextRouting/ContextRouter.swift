@@ -5,6 +5,7 @@ actor ContextRouter {
     private let activeAppCollector = ActiveAppCollector()
     private let browserCollector: BrowserContextCollector
     private let gitCollector = GitContextCollector()
+    private let terminalCollector = TerminalContextCollector()
     private var capturePolicy: CapturePolicy
 
     private var lastEventFingerprint: String?
@@ -46,9 +47,20 @@ actor ContextRouter {
         }
 
         if policy.allowsAppMetadata,
+           isTerminal(bundleIdentifier: activeApp.bundleIdentifier, appName: activeApp.name) {
+            let terminalContext = terminalCollector.collect(from: activeApp)
+            return planTerminalContext(terminalContext, activeApp: activeApp, now: now, force: force)
+        }
+
+        if policy.allowsAppMetadata,
            isCodeApp(bundleIdentifier: activeApp.bundleIdentifier, appName: activeApp.name) {
             let gitContext = await gitCollector.collect()
             return planCodingContext(activeApp: activeApp, gitContext: gitContext, now: now, force: force)
+        }
+
+        if policy.allowsAppMetadata,
+           let specializedPlan = planSpecializedAppContext(activeApp: activeApp, now: now, force: force) {
+            return specializedPlan
         }
 
         return visualFallbackPlan(
@@ -84,11 +96,45 @@ actor ContextRouter {
             ttl: "session",
             fingerprint: fingerprint,
             timestamp: now,
+            activeApp: activeApp,
+            gitContext: nil,
+            filePath: nil,
             browserContext: browserContext,
             captureReason: "context_router_browser"
         )
 
         return structuredPlan(event, confidence: browserConfidence(for: browserContext), force: force)
+    }
+
+    private func planTerminalContext(
+        _ terminalContext: TerminalContext,
+        activeApp: ActiveAppSnapshot,
+        now: Date,
+        force: Bool
+    ) -> ContextCapturePlan {
+        let fingerprint = "terminal|\(terminalContext.fingerprint)"
+        let event = ContextEvent(
+            mode: .terminalDebugging,
+            source: "terminal",
+            summary: terminalContext.summary,
+            activities: ["terminal", "command_line"],
+            keyElements: compact([
+                activeApp.name,
+                activeApp.windowTitle
+            ]),
+            userIntent: "Command-line work context",
+            importance: 0.58,
+            ttl: "session",
+            fingerprint: fingerprint,
+            timestamp: now,
+            activeApp: activeApp,
+            gitContext: nil,
+            filePath: inferredFilePath(from: activeApp.windowTitle),
+            browserContext: nil,
+            captureReason: "context_router_terminal"
+        )
+
+        return structuredPlan(event, confidence: 0.74, force: force)
     }
 
     private func browserImportance(for context: BrowserContext) -> Double {
@@ -145,11 +191,48 @@ actor ContextRouter {
             ttl: "session",
             fingerprint: fingerprint,
             timestamp: now,
+            activeApp: activeApp,
+            gitContext: gitContext,
+            filePath: inferredFilePath(from: activeApp.windowTitle),
             browserContext: nil,
             captureReason: "context_router_coding"
         )
 
         return structuredPlan(event, confidence: projectName == nil ? 0.68 : 0.8, force: force)
+    }
+
+    private func planSpecializedAppContext(
+        activeApp: ActiveAppSnapshot,
+        now: Date,
+        force: Bool
+    ) -> ContextCapturePlan? {
+        let appKind = specializedKind(for: activeApp)
+        guard appKind.mode != .genericVisual else { return nil }
+
+        let fingerprint = "\(appKind.source)|\(activeApp.bundleIdentifier ?? activeApp.name)|\(activeApp.windowTitle ?? "")"
+        let event = ContextEvent(
+            mode: appKind.mode,
+            source: appKind.source,
+            summary: "User is \(appKind.summaryVerb) in \(activeApp.displayName)",
+            activities: appKind.activities,
+            keyElements: compact([
+                activeApp.name,
+                activeApp.windowTitle,
+                activeApp.bundleIdentifier
+            ]),
+            userIntent: appKind.intent,
+            importance: appKind.importance,
+            ttl: "session",
+            fingerprint: fingerprint,
+            timestamp: now,
+            activeApp: activeApp,
+            gitContext: nil,
+            filePath: inferredFilePath(from: activeApp.windowTitle),
+            browserContext: nil,
+            captureReason: "context_router_\(appKind.mode.rawValue)"
+        )
+
+        return structuredPlan(event, confidence: 0.66, force: force)
     }
 
     private func structuredPlan(_ event: ContextEvent, confidence: Double, force: Bool) -> ContextCapturePlan {
@@ -226,6 +309,9 @@ actor ContextRouter {
                 ttl: "session",
                 fingerprint: "desktop|\(activeApp.bundleIdentifier ?? activeApp.name)|\(activeApp.windowTitle ?? "")",
                 timestamp: now,
+                activeApp: activeApp,
+                gitContext: nil,
+                filePath: nil,
                 browserContext: nil,
                 captureReason: reason
             )
@@ -308,6 +394,68 @@ actor ContextRouter {
         return ["terminal", "iterm", "warp", "kitty", "alacritty"].contains {
             lowercased.contains($0)
         }
+    }
+
+    private func specializedKind(for activeApp: ActiveAppSnapshot) -> (
+        mode: ContextMode,
+        source: String,
+        activities: [String],
+        summaryVerb: String,
+        intent: String,
+        importance: Double
+    ) {
+        let bundleIdentifier = activeApp.bundleIdentifier ?? ""
+        let lowercasedName = activeApp.name.lowercased()
+
+        if bundleIdentifier == "com.apple.iWork.Pages"
+            || bundleIdentifier == "com.microsoft.Word"
+            || bundleIdentifier == "com.google.Chrome.app.docs"
+            || ["pages", "microsoft word", "google docs", "obsidian", "notion"].contains(where: { lowercasedName.contains($0) }) {
+            return (
+                .documentWriting,
+                "file",
+                ["writing", "document"],
+                "writing or editing",
+                "Document work context",
+                0.6
+            )
+        }
+
+        if bundleIdentifier == "us.zoom.xos"
+            || bundleIdentifier == "com.microsoft.teams2"
+            || bundleIdentifier == "com.tinyspeck.slackmacgap"
+            || ["zoom", "teams", "slack", "meet"].contains(where: { lowercasedName.contains($0) }) {
+            return (
+                .meetingOrCall,
+                "app",
+                ["meeting", "communication"],
+                "communicating",
+                "Meeting or communication context",
+                0.56
+            )
+        }
+
+        return (
+            .genericVisual,
+            "app",
+            ["desktop", "active_app"],
+            "using",
+            "Desktop activity context",
+            0.42
+        )
+    }
+
+    private func inferredFilePath(from windowTitle: String?) -> String? {
+        guard let windowTitle else { return nil }
+        let pattern = #"(/[^:\n\r]+?\.[A-Za-z0-9_+\-]{1,16})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(windowTitle.startIndex..., in: windowTitle)
+        guard let match = regex.firstMatch(in: windowTitle, range: range),
+              let matchRange = Range(match.range(at: 1), in: windowTitle) else {
+            return nil
+        }
+
+        return String(windowTitle[matchRange])
     }
 
     private func compact(_ values: [String?]) -> [String] {
