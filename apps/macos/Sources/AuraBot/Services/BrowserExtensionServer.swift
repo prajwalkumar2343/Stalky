@@ -35,20 +35,39 @@ struct BrowserExtensionUpdateRequest: Content {
             throw Abort(.badRequest, reason: "Unsupported browser context schemaVersion")
         }
 
-        try Self.validateLength(captureID, field: "captureID", max: 128)
-        try Self.validateLength(browser, field: "browser", max: 80)
-        try Self.validateLength(bundleIdentifier, field: "bundleIdentifier", max: 160)
-        try Self.validateLength(url, field: "url", max: 4096)
-        try Self.validateLength(title, field: "title", max: 512)
-        try Self.validateLength(pageID, field: "pageID", max: 512)
-        try Self.validateLength(mediaID, field: "mediaID", max: 256)
-        try Self.validateLength(viewportSignature, field: "viewportSignature", max: 256)
-        try Self.validateLength(visibleText, field: "visibleText", max: Self.maxVisibleTextLength)
-        try Self.validateLength(selectedText, field: "selectedText", max: Self.maxSelectedTextLength)
-        try Self.validateLength(readableText, field: "readableText", max: Self.maxReadableTextLength)
-        try Self.validateLength(visibleTextHash, field: "visibleTextHash", max: 128)
-        try Self.validateLength(readableTextHash, field: "readableTextHash", max: 128)
-        try Self.validateLength(textCaptureMode, field: "textCaptureMode", max: 80)
+        let normalizedCaptureID = BrowserContextService.normalizedOptionalString(captureID)
+        let normalizedBrowser = browser.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedBundleIdentifier = BrowserContextService.normalizedOptionalString(bundleIdentifier)
+        let normalizedURL = BrowserContextService.normalizedOptionalString(url)
+        let normalizedTitle = BrowserContextService.normalizedOptionalString(title)
+        let normalizedPageID = BrowserContextService.normalizedOptionalString(pageID)
+        let normalizedMediaID = BrowserContextService.normalizedOptionalString(mediaID)
+        let normalizedViewportSignature = BrowserContextService.normalizedOptionalString(viewportSignature)
+        let normalizedVisibleText = BrowserContextService.normalizedOptionalString(visibleText)
+        let normalizedSelectedText = BrowserContextService.normalizedOptionalString(selectedText)
+        let normalizedReadableText = BrowserContextService.normalizedOptionalString(readableText)
+        let normalizedVisibleTextHash = BrowserContextService.normalizedOptionalString(visibleTextHash)
+        let normalizedReadableTextHash = BrowserContextService.normalizedOptionalString(readableTextHash)
+        let normalizedTextCaptureMode = BrowserContextService.normalizedOptionalString(textCaptureMode)
+
+        guard !normalizedBrowser.isEmpty else {
+            throw Abort(.badRequest, reason: "browser is required")
+        }
+
+        try Self.validateLength(normalizedCaptureID, field: "captureID", max: 128)
+        try Self.validateLength(normalizedBrowser, field: "browser", max: 80)
+        try Self.validateLength(normalizedBundleIdentifier, field: "bundleIdentifier", max: 160)
+        try Self.validateLength(normalizedURL, field: "url", max: 4096)
+        try Self.validateLength(normalizedTitle, field: "title", max: 512)
+        try Self.validateLength(normalizedPageID, field: "pageID", max: 512)
+        try Self.validateLength(normalizedMediaID, field: "mediaID", max: 256)
+        try Self.validateLength(normalizedViewportSignature, field: "viewportSignature", max: 256)
+        try Self.validateLength(normalizedVisibleText, field: "visibleText", max: Self.maxVisibleTextLength)
+        try Self.validateLength(normalizedSelectedText, field: "selectedText", max: Self.maxSelectedTextLength)
+        try Self.validateLength(normalizedReadableText, field: "readableText", max: Self.maxReadableTextLength)
+        try Self.validateLength(normalizedVisibleTextHash, field: "visibleTextHash", max: 128)
+        try Self.validateLength(normalizedReadableTextHash, field: "readableTextHash", max: 128)
+        try Self.validateLength(normalizedTextCaptureMode, field: "textCaptureMode", max: 80)
 
         if let scrollPercent, !(0...100).contains(scrollPercent) {
             throw Abort(.badRequest, reason: "scrollPercent must be between 0 and 100")
@@ -57,37 +76,37 @@ struct BrowserExtensionUpdateRequest: Content {
             throw Abort(.badRequest, reason: "noveltyScore must be between 0 and 1")
         }
 
-        let derived = BrowserContextService.deriveActivity(url: url, title: title)
+        let derived = BrowserContextService.deriveActivity(url: normalizedURL, title: normalizedTitle)
         let isPrivateWindow = privateWindow ?? false
-        let normalizedTextCaptureMode = textCaptureMode?.lowercased() ?? ""
+        let normalizedTextCaptureModeValue = normalizedTextCaptureMode?.lowercased() ?? ""
         let shouldDropText =
             isPrivateWindow ||
-            normalizedTextCaptureMode.contains("metadata_only") ||
-            normalizedTextCaptureMode.contains("sensitive")
+            normalizedTextCaptureModeValue.contains("metadata_only") ||
+            normalizedTextCaptureModeValue.contains("sensitive")
 
         return BrowserContext(
             source: .extensionData,
-            browser: browser,
-            bundleIdentifier: bundleIdentifier,
-            url: url,
-            title: title,
+            browser: normalizedBrowser,
+            bundleIdentifier: normalizedBundleIdentifier,
+            url: normalizedURL,
+            title: normalizedTitle,
             activity: activity ?? derived.activity,
-            pageID: pageID ?? derived.pageID,
-            mediaID: mediaID ?? derived.mediaID,
+            pageID: normalizedPageID ?? derived.pageID,
+            mediaID: normalizedMediaID ?? derived.mediaID,
             mediaIsPlaying: mediaIsPlaying ?? ((activity ?? derived.activity) == .media),
             scrollPercent: scrollPercent,
-            viewportSignature: viewportSignature,
+            viewportSignature: normalizedViewportSignature,
             noveltyScore: noveltyScore,
-            visibleText: shouldDropText ? nil : visibleText,
-            selectedText: shouldDropText ? nil : selectedText,
-            readableText: shouldDropText ? nil : readableText,
-            visibleTextHash: visibleTextHash,
-            readableTextHash: readableTextHash,
-            textCaptureMode: isPrivateWindow ? "private_window_metadata_only" : textCaptureMode,
+            visibleText: shouldDropText ? nil : normalizedVisibleText,
+            selectedText: shouldDropText ? nil : normalizedSelectedText,
+            readableText: shouldDropText ? nil : normalizedReadableText,
+            visibleTextHash: normalizedVisibleTextHash,
+            readableTextHash: normalizedReadableTextHash,
+            textCaptureMode: isPrivateWindow ? "private_window_metadata_only" : normalizedTextCaptureMode,
             privateWindow: isPrivateWindow,
             schemaVersion: normalizedSchemaVersion,
-            captureID: captureID,
-            timestamp: timestamp ?? Date()
+            captureID: normalizedCaptureID,
+            timestamp: BrowserContextService.normalizedContextTimestamp(timestamp)
         )
     }
 
@@ -135,7 +154,14 @@ final class BrowserExtensionServer {
         let corsConfiguration = CORSMiddleware.Configuration(
             allowedOrigin: .originBased,
             allowedMethods: [.GET, .POST, .OPTIONS],
-            allowedHeaders: [.accept, .authorization, .contentType, .origin, .xRequestedWith]
+            allowedHeaders: [
+                .accept,
+                .authorization,
+                .contentType,
+                .origin,
+                .xRequestedWith,
+                HTTPHeaders.Name("X-AuraBot-Extension-Key")
+            ]
         )
         app.middleware.use(CORSMiddleware(configuration: corsConfiguration))
 
@@ -146,7 +172,7 @@ final class BrowserExtensionServer {
         app.get("browser", "context", "status") { [browserContextService] _ async -> BrowserExtensionStatusResponse in
             let status = await browserContextService.currentContextStatus()
             let context = status.context
-            let ageSeconds = context.map { Date().timeIntervalSince($0.timestamp) }
+            let ageSeconds = context.map { max(0, Date().timeIntervalSince($0.timestamp)) }
 
             return BrowserExtensionStatusResponse(
                 status: status.hasFreshExtensionContext ? "fresh_extension" : context == nil ? "unavailable" : "fallback",

@@ -126,6 +126,75 @@ final class AuraBotCoreTests: XCTestCase {
         XCTAssertEqual(health.status, "ok")
     }
 
+    func testMemoryFailureMessagesAreActionable() {
+        XCTAssertEqual(
+            MemoryFailureMessage.describe(MemoryServiceError.apiError("invalid payload")),
+            "Memory service rejected the request: invalid payload"
+        )
+        XCTAssertTrue(
+            MemoryFailureMessage.describe(MemoryServiceError.schemaMismatch("memory-v1"))
+                .contains("schema mismatch")
+        )
+        XCTAssertTrue(
+            MemoryFailureMessage.describe(URLError(.badURL))
+                .contains("Memory service URL is invalid")
+        )
+        XCTAssertTrue(
+            MemoryFailureMessage.describe(URLError(.cannotConnectToHost))
+                .contains("unreachable")
+        )
+        XCTAssertTrue(
+            MemoryFailureMessage.describe(URLError(.zeroByteResource))
+                .contains("empty response")
+        )
+    }
+
+    func testLLMRequestValidatorNormalizesInputsAndBuildsSafeEndpoints() throws {
+        XCTAssertEqual(
+            try LLMRequestValidator.normalizedRequiredText("  hello  ", fieldName: "Message"),
+            "hello"
+        )
+        XCTAssertThrowsError(
+            try LLMRequestValidator.normalizedRequiredText("   ", fieldName: "Message")
+        )
+        XCTAssertNoThrow(try LLMRequestValidator.validateImageData(Data([1, 2, 3])))
+        XCTAssertThrowsError(try LLMRequestValidator.validateImageData(Data()))
+
+        XCTAssertEqual(
+            LLMRequestValidator.endpoint(
+                baseURL: " https://openrouter.ai/api/v1/ ",
+                path: "/chat/completions"
+            )?.absoluteString,
+            "https://openrouter.ai/api/v1/chat/completions"
+        )
+        XCTAssertNil(LLMRequestValidator.endpoint(baseURL: "not a url", path: "models"))
+        XCTAssertNil(LLMRequestValidator.endpoint(baseURL: "ftp://example.com", path: "models"))
+    }
+
+    func testLLMFailureMessagesAreActionable() {
+        XCTAssertEqual(
+            LLMFailureMessage.describe(LLMServiceError.emptyInput("Prompt")),
+            "Prompt cannot be empty."
+        )
+        XCTAssertEqual(
+            LLMFailureMessage.describe(LLMServiceError.emptyImage),
+            "Screen analysis needs a non-empty screenshot."
+        )
+        XCTAssertTrue(
+            LLMFailureMessage.describe(
+                LLMServiceError.httpError(statusCode: 401, message: "invalid api key")
+            ).contains("invalid api key")
+        )
+        XCTAssertTrue(
+            LLMFailureMessage.describe(URLError(.cannotConnectToHost))
+                .contains("unreachable")
+        )
+        XCTAssertTrue(
+            LLMFailureMessage.describe(URLError(.cannotParseResponse))
+                .contains("unexpected response")
+        )
+    }
+
     func testYouTubeWatchURLDerivesStableMediaContext() {
         let derived = BrowserContextService.deriveActivity(
             url: "https://www.youtube.com/watch?v=abc123&t=30",
@@ -146,6 +215,60 @@ final class AuraBotCoreTests: XCTestCase {
             BrowserContextService.normalizedPageID(for: components),
             "example.com/docs/page"
         )
+    }
+
+    func testBrowserActivityDerivationIgnoresWhitespaceOnlyFallbacks() {
+        let derived = BrowserContextService.deriveActivity(url: "   ", title: "   ")
+
+        XCTAssertEqual(derived.activity, .browsing)
+        XCTAssertNil(derived.pageID)
+        XCTAssertNil(derived.mediaID)
+    }
+
+    func testBrowserContextFreshnessRejectsFarFutureTimestamps() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertTrue(
+            BrowserContextService.isContextFresh(
+                timestamp: now.addingTimeInterval(30),
+                now: now,
+                freshnessSeconds: 60
+            )
+        )
+        XCTAssertFalse(
+            BrowserContextService.isContextFresh(
+                timestamp: now.addingTimeInterval(120),
+                now: now,
+                freshnessSeconds: 60
+            )
+        )
+        XCTAssertFalse(
+            BrowserContextService.isContextFresh(
+                timestamp: now.addingTimeInterval(-61),
+                now: now,
+                freshnessSeconds: 60
+            )
+        )
+    }
+
+    func testBrowserContextTimestampClampsImpossibleFuturePayloads() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertEqual(
+            BrowserContextService.normalizedContextTimestamp(
+                now.addingTimeInterval(30),
+                now: now
+            ),
+            now.addingTimeInterval(30)
+        )
+        XCTAssertEqual(
+            BrowserContextService.normalizedContextTimestamp(
+                now.addingTimeInterval(120),
+                now: now
+            ),
+            now
+        )
+        XCTAssertEqual(BrowserContextService.normalizedContextTimestamp(nil, now: now), now)
     }
 
     func testBrowserContextSessionKeyPrefersMediaThenPage() {
@@ -174,6 +297,48 @@ final class AuraBotCoreTests: XCTestCase {
 
         XCTAssertEqual(context.sessionKey, "media:video-1")
         XCTAssertTrue(context.llmSummary.contains("Activity: media playback"))
+    }
+
+    func testBrowserContextRouterFingerprintIncludesTextHashesAndCaptureMode() {
+        let base = makeBrowserContext(
+            source: .extensionData,
+            browser: "Google Chrome",
+            bundleIdentifier: "com.google.Chrome",
+            url: "https://example.com/docs",
+            title: "Example Docs",
+            visibleTextHash: "visible-v1",
+            readableTextHash: "readable-v1",
+            textCaptureMode: "full_readable_text"
+        )
+        let changedVisibleText = makeBrowserContext(
+            source: .extensionData,
+            browser: "Google Chrome",
+            bundleIdentifier: "com.google.Chrome",
+            url: "https://example.com/docs",
+            title: "Example Docs",
+            visibleTextHash: "visible-v2",
+            readableTextHash: "readable-v1",
+            textCaptureMode: "full_readable_text"
+        )
+        let metadataOnly = makeBrowserContext(
+            source: .extensionData,
+            browser: "Google Chrome",
+            bundleIdentifier: "com.google.Chrome",
+            url: "https://example.com/docs",
+            title: "Example Docs",
+            visibleTextHash: "visible-v1",
+            readableTextHash: "readable-v1",
+            textCaptureMode: "sensitive_metadata_only"
+        )
+
+        XCTAssertNotEqual(
+            ContextRouter.browserEventFingerprint(for: base),
+            ContextRouter.browserEventFingerprint(for: changedVisibleText)
+        )
+        XCTAssertNotEqual(
+            ContextRouter.browserEventFingerprint(for: base),
+            ContextRouter.browserEventFingerprint(for: metadataOnly)
+        )
     }
 
     func testExtensionConfigDecodesLegacyPayloadWithSecureDefaults() throws {
@@ -256,6 +421,142 @@ final class AuraBotCoreTests: XCTestCase {
         XCTAssertEqual(context.readableTextHash, "readable-hash")
     }
 
+    func testBrowserExtensionPayloadNormalizesWhitespaceAndEmptyFields() throws {
+        let payload = BrowserExtensionUpdateRequest(
+            schemaVersion: 1,
+            captureID: "  capture-2  ",
+            browser: "  Google Chrome  ",
+            bundleIdentifier: "  com.google.Chrome  ",
+            url: "  https://example.com/article  ",
+            title: "  Example Article  ",
+            activity: nil,
+            pageID: "   ",
+            mediaID: nil,
+            mediaIsPlaying: nil,
+            scrollPercent: 0,
+            viewportSignature: "  viewport-2  ",
+            noveltyScore: 1,
+            visibleText: "  Visible article text  ",
+            selectedText: "   ",
+            readableText: nil,
+            visibleTextHash: "  visible-hash  ",
+            readableTextHash: nil,
+            textCaptureMode: "  visible_viewport  ",
+            privateWindow: false,
+            timestamp: Date(timeIntervalSince1970: 0)
+        )
+
+        let context = try payload.asBrowserContext()
+
+        XCTAssertEqual(context.captureID, "capture-2")
+        XCTAssertEqual(context.browser, "Google Chrome")
+        XCTAssertEqual(context.bundleIdentifier, "com.google.Chrome")
+        XCTAssertEqual(context.url, "https://example.com/article")
+        XCTAssertEqual(context.title, "Example Article")
+        XCTAssertEqual(context.pageID, "example.com/article")
+        XCTAssertEqual(context.viewportSignature, "viewport-2")
+        XCTAssertEqual(context.visibleText, "Visible article text")
+        XCTAssertNil(context.selectedText)
+        XCTAssertEqual(context.visibleTextHash, "visible-hash")
+        XCTAssertEqual(context.textCaptureMode, "visible_viewport")
+    }
+
+    func testBrowserExtensionPayloadRejectsBlankBrowserName() {
+        let payload = BrowserExtensionUpdateRequest(
+            schemaVersion: 1,
+            captureID: "capture-blank-browser",
+            browser: "   ",
+            bundleIdentifier: "com.google.Chrome",
+            url: "https://example.com/article",
+            title: "Example Article",
+            activity: .browsing,
+            pageID: nil,
+            mediaID: nil,
+            mediaIsPlaying: nil,
+            scrollPercent: nil,
+            viewportSignature: nil,
+            noveltyScore: nil,
+            visibleText: nil,
+            selectedText: nil,
+            readableText: nil,
+            visibleTextHash: nil,
+            readableTextHash: nil,
+            textCaptureMode: nil,
+            privateWindow: false,
+            timestamp: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertThrowsError(try payload.asBrowserContext())
+    }
+
+    func testBrowserExtensionPayloadDropsSensitiveMetadataOnlyText() throws {
+        let payload = BrowserExtensionUpdateRequest(
+            schemaVersion: 1,
+            captureID: "capture-sensitive",
+            browser: "Google Chrome",
+            bundleIdentifier: "com.google.Chrome",
+            url: "https://example.com/account",
+            title: "Account",
+            activity: .browsing,
+            pageID: nil,
+            mediaID: nil,
+            mediaIsPlaying: nil,
+            scrollPercent: nil,
+            viewportSignature: nil,
+            noveltyScore: nil,
+            visibleText: "Sensitive visible text",
+            selectedText: "Sensitive selection",
+            readableText: "Sensitive readable text",
+            visibleTextHash: "visible-hash",
+            readableTextHash: "readable-hash",
+            textCaptureMode: "sensitive_metadata_only",
+            privateWindow: false,
+            timestamp: Date(timeIntervalSince1970: 0)
+        )
+
+        let context = try payload.asBrowserContext()
+
+        XCTAssertNil(context.visibleText)
+        XCTAssertNil(context.selectedText)
+        XCTAssertNil(context.readableText)
+        XCTAssertEqual(context.visibleTextHash, "visible-hash")
+        XCTAssertEqual(context.readableTextHash, "readable-hash")
+        XCTAssertEqual(context.sourceQuality, .extensionMetadataOnly)
+    }
+
+    func testBrowserExtensionPayloadClampsFarFutureTimestamp() throws {
+        let payload = BrowserExtensionUpdateRequest(
+            schemaVersion: 1,
+            captureID: "capture-future",
+            browser: "Google Chrome",
+            bundleIdentifier: "com.google.Chrome",
+            url: "https://example.com/article",
+            title: "Example Article",
+            activity: .browsing,
+            pageID: nil,
+            mediaID: nil,
+            mediaIsPlaying: nil,
+            scrollPercent: nil,
+            viewportSignature: nil,
+            noveltyScore: nil,
+            visibleText: nil,
+            selectedText: nil,
+            readableText: nil,
+            visibleTextHash: nil,
+            readableTextHash: nil,
+            textCaptureMode: nil,
+            privateWindow: false,
+            timestamp: Date().addingTimeInterval(600)
+        )
+
+        let before = Date()
+        let context = try payload.asBrowserContext()
+        let after = Date()
+
+        XCTAssertGreaterThanOrEqual(context.timestamp, before)
+        XCTAssertLessThanOrEqual(context.timestamp, after)
+    }
+
     func testBrowserExtensionPayloadRejectsUnsupportedSchemaVersion() throws {
         let payload = BrowserExtensionUpdateRequest(
             schemaVersion: 999,
@@ -282,6 +583,74 @@ final class AuraBotCoreTests: XCTestCase {
         )
 
         XCTAssertThrowsError(try payload.asBrowserContext())
+    }
+
+    func testPermissionStateResolverDoesNotPersistScreenRecordingPendingRestart() {
+        XCTAssertEqual(
+            PermissionStateResolver.screenRecordingState(isGranted: false, requestedThisSession: true),
+            .pendingRestart
+        )
+        XCTAssertEqual(
+            PermissionStateResolver.screenRecordingState(isGranted: false, requestedThisSession: false),
+            .notGranted
+        )
+        XCTAssertEqual(
+            PermissionStateResolver.screenRecordingState(isGranted: true, requestedThisSession: true),
+            .granted
+        )
+
+        let persisted = PermissionStateResolver.persistedRequestedKinds(
+            from: ["screenRecording", "accessibility", "microphone", "unknown"]
+        )
+
+        XCTAssertFalse(persisted.contains(.screenRecording))
+        XCTAssertEqual(persisted, [.accessibility, .microphone])
+    }
+
+    func testPermissionGuidancePrioritizesIdentityWarningAndRestartRecovery() {
+        let notGranted = AppPermissionStatus(kind: .screenRecording, state: .notGranted)
+        let pendingRestart = AppPermissionStatus(kind: .screenRecording, state: .pendingRestart)
+        let granted = AppPermissionStatus(kind: .screenRecording, state: .granted)
+
+        XCTAssertNil(
+            PermissionGuidance.message(
+                requiredStatuses: [granted],
+                appIdentityWarning: "Move AuraBot.app to Applications."
+            )
+        )
+        XCTAssertEqual(
+            PermissionGuidance.message(
+                requiredStatuses: [notGranted],
+                appIdentityWarning: "Move AuraBot.app to Applications."
+            ),
+            "Move AuraBot.app to Applications."
+        )
+        XCTAssertTrue(
+            PermissionGuidance.message(
+                requiredStatuses: [pendingRestart],
+                appIdentityWarning: nil
+            )?.contains("restart Aura") == true
+        )
+        XCTAssertTrue(
+            PermissionGuidance.message(
+                requiredStatuses: [notGranted],
+                appIdentityWarning: nil
+            )?.contains("browser/app metadata") == true
+        )
+    }
+
+    func testPermissionGuidanceRowCopyMatchesRequiredOptionalAndRestartStates() {
+        let requiredMissing = AppPermissionStatus(kind: .screenRecording, state: .notGranted)
+        let optionalMissing = AppPermissionStatus(kind: .microphone, state: .notGranted)
+        let pendingRestart = AppPermissionStatus(kind: .screenRecording, state: .pendingRestart)
+        let granted = AppPermissionStatus(kind: .accessibility, state: .granted)
+
+        XCTAssertEqual(PermissionGuidance.actionTitle(for: requiredMissing), "Open Screen Recording")
+        XCTAssertEqual(PermissionGuidance.actionTitle(for: pendingRestart), "Restart Aura")
+        XCTAssertEqual(PermissionGuidance.actionTitle(for: granted), "Enabled")
+        XCTAssertTrue(PermissionGuidance.detail(for: requiredMissing).contains("Required"))
+        XCTAssertTrue(PermissionGuidance.detail(for: optionalMissing).contains("Optional"))
+        XCTAssertTrue(PermissionGuidance.detail(for: pendingRestart).contains("relaunch"))
     }
 
     func testBrowserContextServiceReportsFreshExtensionStatus() async throws {
@@ -374,6 +743,97 @@ final class AuraBotCoreTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(AppConfig.self, from: payload))
     }
 
+    func testAppConfigSanitizerClampsRangesAndRestoresRequiredDefaults() {
+        var config = AppConfig.default
+        config.capture.intervalSeconds = -10
+        config.capture.quality = 500
+        config.capture.maxWidth = 1
+        config.capture.meaningfulChangeThreshold = 100
+        config.llm.baseURL = "not a url"
+        config.llm.model = "   "
+        config.llm.openRouterChatModel = ""
+        config.llm.openRouterAPIKey = "  secret  "
+        config.llm.maxTokens = 1_000_000
+        config.llm.temperature = -1
+        config.memory.baseURL = "ftp://example.com"
+        config.memory.userID = "   "
+        config.memory.collectionName = ""
+        config.app.memoryWindow = 0
+        config.app.activePluginID = "   "
+        config.browserExtension.port = 99_999
+        config.browserExtension.freshnessSeconds = 0
+        config.browserExtension.apiKey = "  ext-key  "
+        config.browserExtension.allowedOrigins = ["  http://localhost:  ", "", "http://localhost:"]
+        config.computerUse.maxImageDimension = 99_999
+
+        let sanitized = config.sanitizedForPersistence()
+
+        XCTAssertEqual(sanitized.capture.intervalSeconds, 10)
+        XCTAssertEqual(sanitized.capture.quality, 100)
+        XCTAssertEqual(sanitized.capture.maxWidth, 320)
+        XCTAssertEqual(sanitized.capture.meaningfulChangeThreshold, 64)
+        XCTAssertEqual(sanitized.llm.baseURL, LLMConfig().baseURL)
+        XCTAssertEqual(sanitized.llm.model, LLMConfig().model)
+        XCTAssertEqual(sanitized.llm.openRouterChatModel, LLMConfig().openRouterChatModel)
+        XCTAssertEqual(sanitized.llm.openRouterAPIKey, "secret")
+        XCTAssertEqual(sanitized.llm.maxTokens, 64_000)
+        XCTAssertEqual(sanitized.llm.temperature, 0)
+        XCTAssertEqual(sanitized.memory.baseURL, MemoryConfig.managedPgliteBaseURL)
+        XCTAssertEqual(sanitized.memory.userID, "default_user")
+        XCTAssertEqual(sanitized.memory.collectionName, "screen_memories_v3")
+        XCTAssertEqual(sanitized.app.memoryWindow, 1)
+        XCTAssertNil(sanitized.app.activePluginID)
+        XCTAssertEqual(sanitized.browserExtension.port, 65_535)
+        XCTAssertEqual(sanitized.browserExtension.freshnessSeconds, 1)
+        XCTAssertEqual(sanitized.browserExtension.apiKey, "ext-key")
+        XCTAssertEqual(sanitized.browserExtension.allowedOrigins, ["http://localhost:"])
+        XCTAssertEqual(sanitized.computerUse.maxImageDimension, 4096)
+    }
+
+    func testAppConfigLoadSanitizesMalformedPersistedConfiguration() throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aurabot-config-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let payload = """
+        {
+          "capture": {
+            "intervalSeconds": 1,
+            "quality": 5
+          },
+          "llm": {
+            "baseURL": "nope",
+            "model": ""
+          },
+          "memory": {
+            "baseURL": "http://localhost:8000",
+            "userID": "   "
+          },
+          "extension": {
+            "port": -1,
+            "freshnessSeconds": -2,
+            "allowedOrigins": []
+          },
+          "computerUse": {
+            "maxImageDimension": -50
+          }
+        }
+        """
+        try payload.data(using: .utf8)!.write(to: outputURL)
+
+        let loaded = AppConfig.load(from: outputURL.path)
+
+        XCTAssertEqual(loaded.capture.intervalSeconds, 10)
+        XCTAssertEqual(loaded.capture.quality, 30)
+        XCTAssertEqual(loaded.llm.baseURL, LLMConfig().baseURL)
+        XCTAssertEqual(loaded.llm.model, LLMConfig().model)
+        XCTAssertEqual(loaded.memory.baseURL, MemoryConfig.managedPgliteBaseURL)
+        XCTAssertEqual(loaded.memory.userID, "default_user")
+        XCTAssertEqual(loaded.browserExtension.port, 1)
+        XCTAssertEqual(loaded.browserExtension.freshnessSeconds, 1)
+        XCTAssertEqual(loaded.browserExtension.allowedOrigins, ExtensionConfig().allowedOrigins)
+        XCTAssertEqual(loaded.computerUse.maxImageDimension, 0)
+    }
+
     func testComputerUsePermissionParsingFromEmbeddedToolText() async throws {
         var config = ComputerUseConfig()
         config.enabled = true
@@ -395,6 +855,57 @@ final class AuraBotCoreTests: XCTestCase {
 
         XCTAssertTrue(permissions.accessibility)
         XCTAssertFalse(permissions.screenRecording)
+    }
+
+    func testComputerUsePermissionParserTreatsNegativePhrasesAsDenied() {
+        XCTAssertFalse(
+            ComputerUsePermissionParser.permissionLineValue(
+                label: "Screen Recording",
+                in: "Screen Recording: not authorized"
+            )
+        )
+        XCTAssertFalse(
+            ComputerUsePermissionParser.permissionLineValue(
+                label: "Accessibility",
+                in: "Accessibility: not allowed"
+            )
+        )
+        XCTAssertTrue(
+            ComputerUsePermissionParser.permissionLineValue(
+                label: "Accessibility",
+                in: "Accessibility: authorized"
+            )
+        )
+    }
+
+    func testComputerUsePermissionParserNormalizesStructuredValues() {
+        XCTAssertTrue(ComputerUsePermissionParser.boolValue(.string("  Authorized  ")))
+        XCTAssertTrue(ComputerUsePermissionParser.boolValue(.string("YES")))
+        XCTAssertFalse(ComputerUsePermissionParser.boolValue(.string(" not granted ")))
+        XCTAssertFalse(ComputerUsePermissionParser.boolValue(.string("disabled")))
+        XCTAssertTrue(ComputerUsePermissionParser.boolValue(.int(1)))
+        XCTAssertFalse(ComputerUsePermissionParser.boolValue(.double(0)))
+    }
+
+    func testComputerUsePermissionGuidanceNamesMissingPermission() {
+        XCTAssertEqual(
+            ComputerUsePermissionParser.guidanceMessage(
+                for: ComputerUsePermissionStatus(accessibility: false, screenRecording: true)
+            ),
+            "AuraBot needs Accessibility permission to inspect and control app windows."
+        )
+        XCTAssertEqual(
+            ComputerUsePermissionParser.guidanceMessage(
+                for: ComputerUsePermissionStatus(accessibility: true, screenRecording: false)
+            ),
+            "AuraBot needs Screen Recording permission to capture window state for Computer Use."
+        )
+        XCTAssertEqual(
+            ComputerUsePermissionParser.guidanceMessage(
+                for: ComputerUsePermissionStatus(accessibility: true, screenRecording: true)
+            ),
+            "Computer Use is ready."
+        )
     }
 
     func testComputerUsePermissionFailureSurfacesAsFailedStatus() async throws {
@@ -530,6 +1041,9 @@ final class AuraBotCoreTests: XCTestCase {
         bundleIdentifier: String,
         url: String,
         title: String,
+        visibleTextHash: String? = "visible-hash",
+        readableTextHash: String? = nil,
+        textCaptureMode: String? = "visible_viewport",
         timestamp: Date = Date(timeIntervalSince1970: 0)
     ) -> BrowserContext {
         let derived = BrowserContextService.deriveActivity(url: url, title: title)
@@ -550,9 +1064,9 @@ final class AuraBotCoreTests: XCTestCase {
             visibleText: "Visible documentation text",
             selectedText: nil,
             readableText: nil,
-            visibleTextHash: "visible-hash",
-            readableTextHash: nil,
-            textCaptureMode: "visible_viewport",
+            visibleTextHash: visibleTextHash,
+            readableTextHash: readableTextHash,
+            textCaptureMode: textCaptureMode,
             privateWindow: false,
             captureID: "capture-fixture",
             timestamp: timestamp

@@ -250,3 +250,36 @@ enum MemoryServiceError: LocalizedError {
         }
     }
 }
+
+enum MemoryFailureMessage {
+    static func describe(_ error: Error) -> String {
+        if let memoryError = error as? MemoryServiceError {
+            switch memoryError {
+            case .apiError(let message):
+                return "Memory service rejected the request: \(message)"
+            case .schemaMismatch(let version):
+                return "Memory service schema mismatch. Aura expected \(MemoryV2JSON.schemaVersion), but the service returned \(version). Restart the bundled memory service or update it."
+            }
+        }
+
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .badURL, .unsupportedURL:
+                return "Memory service URL is invalid. Check the Memory URL in Settings."
+            case .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet, .timedOut:
+                return "Memory service is unreachable. Aura will keep running, but context cannot be saved until the local memory service is available."
+            case .badServerResponse:
+                return "Memory service returned an unexpected response. Check that the bundled memory server is running."
+            case .zeroByteResource:
+                return "Memory service returned an empty response. Try restarting Aura or the memory service."
+            default:
+                break
+            }
+        }
+
+        let description = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        return description.isEmpty
+            ? "Memory service failed unexpectedly."
+            : "Memory service failed: \(description)"
+    }
+}

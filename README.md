@@ -6,25 +6,26 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-AuraBot is an intelligent screen capture and memory system that learns your context and activities over time. It uses vision AI to understand your screen content and stores meaningful memories using a vector database, enabling you to query your digital history and get AI-assisted responses with personal context.
+AuraBot is a local-first macOS memory assistant that captures useful work context, stores it in a managed PGlite backend, and lets you search or chat over your recent activity. The current app prefers structured browser, terminal, project, and app metadata when available, and only falls back to visual screen capture when it needs richer context.
 
 ## How It Works
 
 ```
-Screen Capture (every 30s) → Vision AI Analysis → Vector Storage → Memory Search → AI Responses
+App / Browser / Project Context → Smart Routing → Optional Screen Analysis → Local Memory Storage → Search / Chat
 ```
 
-1. **Capture**: AuraBot periodically screenshots your screen
-2. **Analyze**: Vision AI understands what's on screen
-3. **Store**: Memories are embedded and stored in a vector database
-4. **Retrieve**: Search your activity history with natural language
-5. **Respond**: Get AI-powered answers with your personal context
+1. **Collect**: AuraBot checks the active workspace and browser context on a short probe loop
+2. **Route**: The app stores structured context directly for supported browser, terminal, coding, and document workflows
+3. **Fallback**: When structured context is not enough, AuraBot captures and analyzes the screen
+4. **Store**: Context is written to the local Memory v2 backend for search, recent context, and graph extraction
+5. **Retrieve**: You can search your activity history or use memory-aware responses inside the app
 
 ### Architecture
 
-- **macOS App**: `apps/macos` handles screen capture, user interaction, and starts the managed local memory backend
+- **macOS App**: `apps/macos` handles context routing, optional screen capture, user interaction, and starts the managed local memory backend
 - **PGlite Memory Backend**: `services/memory-pglite` provides Memory v2 storage, search, graph extraction, and markdown brain indexing
-- **LLM Integration**: OpenRouter for vision and chat capabilities
+- **LLM Integration**: OpenRouter powers screen analysis, chat, and prompt enhancement
+- **Browser Context Server**: the macOS app exposes a local extension API on `127.0.0.1:7345` by default
 - **Computer Use Engine**: AuraBot embeds the reviewed Cua computer-use engine directly and presents it only as AuraBot
 
 ### Repository Layout
@@ -73,7 +74,17 @@ Packaged builds include AuraBot Computer Use directly in the macOS binary. Setti
 
 - **Menu Bar**: Access capture controls, recent memories, and search
 - **Cmd+Opt+E**: Enhance selected text with your memory context
-- **Search**: Query your activity history with natural language
+- **Search / Chat**: Query your activity history with natural language
+
+## Capture Behavior
+
+AuraBot does not simply save a screenshot every 30 seconds.
+
+- It probes for new context every 5 seconds by default.
+- It keeps at least a 20-second minimum gap between accepted visual captures.
+- It stores structured context directly for supported browser, terminal, coding, and document flows.
+- It triggers visual capture for meaningful visual changes, page changes, new media sessions, scroll novelty, or long idle checkpoints.
+- It takes an initial capture when capture starts, then continues only when the routing and change-detection logic says the update is worth storing.
 
 ## Configuration
 
@@ -84,7 +95,14 @@ Key environment variables (see `.env.example`):
 | `OPENROUTER_API_KEY` | Your OpenRouter API key (required) |
 | `AURABOT_MEMORY_PGLITE_PORT` | Managed local memory backend port (default: 8766) |
 
-Capture settings and matching API keys can be adjusted in `~/.aurabot/config.json` after first launch.
+Runtime settings live in `~/.aurabot/config.json` after first launch. Relevant defaults in the current app include:
+
+- `capture.probeIntervalSeconds`: `5`
+- `capture.minCaptureGapSeconds`: `20`
+- `capture.idleCaptureSeconds`: `300`
+- `capture.meaningfulChangeThreshold`: `10`
+- `extension.port`: `7345`
+- `extension.freshnessSeconds`: `15`
 
 ## License
 

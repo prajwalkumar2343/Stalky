@@ -18,6 +18,8 @@ struct BrowserContextStatus: Sendable {
 }
 
 actor BrowserContextService {
+    static let maxContextFutureSkewSeconds: TimeInterval = 60
+
     private let config: ExtensionConfig
     private var latestExtensionContext: BrowserContext?
 
@@ -36,7 +38,11 @@ actor BrowserContextService {
     func currentContextStatus() async -> BrowserContextStatus {
         let now = Date()
         if let latestExtensionContext,
-           now.timeIntervalSince(latestExtensionContext.timestamp) <= TimeInterval(config.freshnessSeconds) {
+           Self.isContextFresh(
+            timestamp: latestExtensionContext.timestamp,
+            now: now,
+            freshnessSeconds: config.freshnessSeconds
+           ) {
             return BrowserContextStatus(
                 context: latestExtensionContext,
                 staleExtensionContext: nil,
@@ -70,8 +76,8 @@ actor BrowserContextService {
         }
 
         let snapshot = browserSnapshot(for: browser)
-        let normalizedURL = snapshot.url?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedTitle = snapshot.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURL = Self.normalizedOptionalString(snapshot.url)
+        let normalizedTitle = Self.normalizedOptionalString(snapshot.title)
         let derived = BrowserContextService.deriveActivity(url: normalizedURL, title: normalizedTitle)
 
         return BrowserContext(
@@ -143,8 +149,8 @@ actor BrowserContextService {
     }
 
     static func deriveActivity(url: String?, title: String?) -> (activity: BrowserActivityKind, pageID: String?, mediaID: String?) {
-        guard let rawURL = url, let components = URLComponents(string: rawURL) else {
-            let fallbackPageID = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let rawURL = normalizedOptionalString(url), let components = URLComponents(string: rawURL) else {
+            let fallbackPageID = normalizedOptionalString(title)
             return (.browsing, fallbackPageID, nil)
         }
 
@@ -170,6 +176,42 @@ actor BrowserContextService {
         let host = components.host?.lowercased() ?? "unknown"
         let path = components.path.isEmpty ? "/" : components.path
         return host + path
+    }
+
+    static func normalizedOptionalString(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static func normalizedContextTimestamp(
+        _ timestamp: Date?,
+        now: Date = Date(),
+        maxFutureSkewSeconds: TimeInterval = maxContextFutureSkewSeconds
+    ) -> Date {
+        guard let timestamp else {
+            return now
+        }
+
+        if timestamp.timeIntervalSince(now) > maxFutureSkewSeconds {
+            return now
+        }
+
+        return timestamp
+    }
+
+    static func isContextFresh(
+        timestamp: Date,
+        now: Date,
+        freshnessSeconds: Int,
+        maxFutureSkewSeconds: TimeInterval = maxContextFutureSkewSeconds
+    ) -> Bool {
+        let age = now.timeIntervalSince(timestamp)
+        guard age >= -maxFutureSkewSeconds else {
+            return false
+        }
+
+        return age <= TimeInterval(max(freshnessSeconds, 0))
     }
 }
 

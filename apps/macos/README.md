@@ -1,16 +1,17 @@
 # AuraBot - Swift Version
 
-A complete Swift/macOS rewrite of the AuraBot screen memory assistant.
+A native Swift/macOS rewrite of AuraBot with smart context routing, optional visual capture, a local memory backend, and an embedded computer-use engine.
 
 ## Features
 
-- ✅ **Screen Capture** - Periodic screenshots using ScreenCaptureKit
+- ✅ **Smart Context Capture** - Routes browser, terminal, coding, and app context before falling back to screenshots
+- ✅ **Screen Capture Fallback** - Uses ScreenCaptureKit when visual context is needed
 - ✅ **Memory Storage** - Memory API integration with vector embeddings
 - ✅ **LLM Integration** - OpenAI-compatible API support
 - ✅ **Quick Enhance** - Global hotkey (⌘⌥E) to enhance any text
 - ✅ **Floating Overlay** - System-wide floating button
 - ✅ **SwiftUI Interface** - Native macOS app
-- ✅ **HTTP API** - Browser extension support
+- ✅ **Browser Context API** - Local HTTP API for browser extension support
 - ✅ **Computer Use** - Embedded AuraBot computer-use engine for app/window automation
 
 ## Requirements
@@ -48,10 +49,16 @@ swift build -c release
 
 ## Architecture
 
-```
+```text
 Sources/AuraBot/
 ├── Core/
 │   └── AppDelegate.swift      # App lifecycle & global hotkeys
+├── ContextRouting/
+│   ├── ContextRouter.swift    # Chooses structured context vs visual fallback
+│   ├── BrowserContextCollector.swift
+│   ├── ActiveAppCollector.swift
+│   ├── TerminalContextCollector.swift
+│   └── GitContextCollector.swift
 ├── Models/
 │   ├── Config.swift           # Configuration models
 │   ├── Memory.swift           # Memory data models
@@ -60,16 +67,19 @@ Sources/AuraBot/
 │   ├── AppService.swift       # Main service orchestrator
 │   ├── LLMService.swift       # LLM API client
 │   ├── MemoryService.swift    # Memory API client
+│   ├── MemoryBackendSupervisor.swift # Managed local memory backend
 │   ├── ScreenCaptureService.swift  # ScreenCaptureKit wrapper
-│   ├── EnhancerService.swift  # Prompt enhancement logic
-│   └── APIServer.swift        # HTTP API for extension
+│   ├── BrowserContextService.swift  # Browser context cache and fallback state
+│   └── BrowserExtensionServer.swift # Local extension API
+├── Screens/
+│   ├── DashboardView.swift
+│   ├── MemoriesView.swift
+│   ├── ChatView.swift
+│   ├── SettingsView.swift
+│   └── PermissionOnboardingView.swift
 ├── UI/
 │   ├── AuraBotApp.swift       # SwiftUI App entry
-│   ├── MainView.swift         # Main window layout
-│   ├── DashboardView.swift    # Dashboard view
-│   ├── MemoriesView.swift     # Memory browser
-│   ├── ChatView.swift         # Chat interface
-│   ├── SettingsView.swift     # Settings panel
+│   ├── ContentView.swift      # Main window layout
 │   ├── OverlayWindow.swift    # Floating button window
 │   └── QuickEnhancePanel.swift # Quick enhance popup
 └── Utils/
@@ -87,9 +97,10 @@ Sources/AuraBot/
 ### Screen Capture
 
 1. Enable capture in settings
-2. Screenshots are taken every 30s (configurable)
-3. AI analyzes and stores context
-4. Search memories anytime
+2. AuraBot probes for context every 5 seconds by default
+3. Structured browser/app/project context is stored directly when available
+4. ScreenCaptureKit is used only when visual fallback is needed
+5. Visual captures respect a minimum gap and change-detection rules before being stored
 
 ### Chat with Memories
 
@@ -114,12 +125,25 @@ Config is stored at `~/.aurabot/config.json`:
   "capture": {
     "intervalSeconds": 30,
     "quality": 60,
-    "enabled": true
+    "maxWidth": 1280,
+    "maxHeight": 720,
+    "enabled": true,
+    "probeIntervalSeconds": 5,
+    "minCaptureGapSeconds": 20,
+    "idleCaptureSeconds": 300,
+    "previewWidth": 160,
+    "previewHeight": 90,
+    "meaningfulChangeThreshold": 10,
+    "scrollCaptureCooldownSeconds": 20
   },
   "llm": {
-    "baseURL": "http://localhost:1234/v1",
-    "model": "local-model",
-    "openRouterChatModel": "openai/gpt-5.3",
+    "baseURL": "https://openrouter.ai/api/v1",
+    "model": "google/gemini-flash-1.5",
+    "maxTokens": 512,
+    "temperature": 0.7,
+    "timeoutSeconds": 30,
+    "openRouterAPIKey": "",
+    "openRouterChatModel": "anthropic/claude-3.5-sonnet",
     "contextCollectorRewrite": {
       "enabled": false,
       "allowedModels": [
@@ -135,6 +159,9 @@ Config is stored at `~/.aurabot/config.json`:
     "apiKey": "memory-v2-token"
   },
   "extension": {
+    "enabled": true,
+    "port": 7345,
+    "freshnessSeconds": 15,
     "apiKey": "browser-extension-token",
     "allowedOrigins": [
       "chrome-extension://",
@@ -162,6 +189,13 @@ Content-Type: application/json
 ```
 
 Extensions may also send `X-AuraBot-Extension-Key: browser-extension-token` instead of the bearer header. The token must match `extension.apiKey` in `~/.aurabot/config.json`; requests without a matching key are rejected. Origins must also match `extension.allowedOrigins`.
+
+### Current Capture Logic
+
+- The context loop runs every `capture.probeIntervalSeconds` seconds, default `5`.
+- Browser extension context is preferred when it is fresh.
+- Terminal, coding, and several app-specific workflows produce structured context events without requiring a screenshot.
+- Visual capture is used as fallback and is gated by change detection, media-session changes, scroll novelty, page changes, and idle checkpoints.
 
 ## License
 

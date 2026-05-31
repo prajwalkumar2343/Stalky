@@ -99,6 +99,53 @@ struct AppPermissionStatus: Identifiable, Equatable {
     var isGranted: Bool { state == .granted }
 }
 
+enum PermissionGuidance {
+    static func message(
+        requiredStatuses: [AppPermissionStatus],
+        appIdentityWarning: String?
+    ) -> String? {
+        guard !requiredStatuses.allSatisfy(\.isGranted) else { return nil }
+
+        if let appIdentityWarning {
+            return appIdentityWarning
+        }
+
+        if requiredStatuses.contains(where: { $0.kind == .screenRecording && $0.state == .pendingRestart }) {
+            return "Screen Recording was requested. If you already enabled it, restart Aura from the Screen Recording row. If it still asks again after restart, open System Settings and confirm the checked app is this AuraBot.app."
+        }
+
+        return "Grant Screen Recording to enable visual capture. Aura will still save browser/app metadata where possible while you finish setup."
+    }
+
+    static func detail(for status: AppPermissionStatus) -> String {
+        switch status.state {
+        case .granted:
+            return status.kind.isRequired
+                ? "Ready. Aura can use this required capability."
+                : "Enabled. You can turn it off later in System Settings."
+        case .pendingRestart:
+            return "macOS may require a restart before this permission becomes visible to Aura. Click to relaunch Aura, then return here."
+        case .notGranted:
+            if status.kind.isRequired {
+                return "Required to finish setup. Click to open the matching System Settings panel."
+            }
+
+            return "Optional. Click to enable richer features, or skip it and keep using Aura."
+        }
+    }
+
+    static func actionTitle(for status: AppPermissionStatus) -> String {
+        switch status.state {
+        case .granted:
+            return "Enabled"
+        case .pendingRestart:
+            return "Restart Aura"
+        case .notGranted:
+            return status.kind.actionTitle
+        }
+    }
+}
+
 enum AppPermissionState: Equatable {
     case granted
     case pendingRestart
@@ -138,6 +185,20 @@ enum AppPermissionState: Equatable {
     }
 }
 
+enum PermissionStateResolver {
+    static func screenRecordingState(isGranted: Bool, requestedThisSession: Bool) -> AppPermissionState {
+        if isGranted {
+            return .granted
+        }
+
+        return requestedThisSession ? .pendingRestart : .notGranted
+    }
+
+    static func persistedRequestedKinds(from rawValues: [String]) -> Set<AppPermissionKind> {
+        Set(rawValues.compactMap(AppPermissionKind.init(rawValue:))).filter { $0 != .screenRecording }
+    }
+}
+
 @MainActor
 enum PermissionCenter {
     private static let requestedKindsDefaultsKey = "AuraBotRequestedPermissionKinds"
@@ -156,12 +217,15 @@ enum PermissionCenter {
     static func state(for kind: AppPermissionKind) -> AppPermissionState {
         switch kind {
         case .screenRecording:
-            if hasScreenRecordingAccess() {
+            let isGranted = hasScreenRecordingAccess()
+            if isGranted {
                 clearRequested(kind)
-                return .granted
             }
 
-            return requestedKinds.contains(kind) ? .pendingRestart : .notGranted
+            return PermissionStateResolver.screenRecordingState(
+                isGranted: isGranted,
+                requestedThisSession: requestedKinds.contains(kind)
+            )
         case .accessibility:
             return isGranted(kind) ? .granted : .notGranted
         case .microphone:
@@ -280,12 +344,16 @@ enum PermissionCenter {
 
     private static func loadRequestedKinds() -> Set<AppPermissionKind> {
         let rawValues = UserDefaults.standard.stringArray(forKey: requestedKindsDefaultsKey) ?? []
-        return Set(rawValues.compactMap(AppPermissionKind.init(rawValue:)))
+        return PermissionStateResolver.persistedRequestedKinds(from: rawValues)
     }
 
     private static func persistRequestedKinds() {
+        // Screen Recording needs a restart only after the request in the current
+        // app session. If the relaunched app still cannot preflight capture, the
+        // permission was not actually granted and the row must open Settings.
+        let persistedKinds = requestedKinds.filter { $0 != .screenRecording }
         UserDefaults.standard.set(
-            requestedKinds.map(\.rawValue).sorted(),
+            persistedKinds.map(\.rawValue).sorted(),
             forKey: requestedKindsDefaultsKey
         )
     }
@@ -1028,12 +1096,17 @@ struct PermissionChecklistRow: View {
                         .font(Typography.callout)
                         .foregroundColor(Colors.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    Text(PermissionGuidance.detail(for: status))
+                        .font(Typography.caption)
+                        .foregroundColor(status.state == .pendingRestart ? Colors.warning : Colors.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: Spacing.xs) {
-                    Text(status.state.title)
+                    Text(PermissionGuidance.actionTitle(for: status))
                         .font(Typography.caption)
                         .foregroundColor(status.state.tintColor)
 

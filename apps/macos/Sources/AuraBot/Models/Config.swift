@@ -376,7 +376,18 @@ extension AppConfig {
               let config = try? JSONDecoder().decode(AppConfig.self, from: data) else {
             return .default
         }
-        return config
+        return config.sanitizedForPersistence()
+    }
+
+    func sanitizedForPersistence() -> AppConfig {
+        var sanitized = self
+        sanitized.capture = ConfigSanitizer.sanitize(capture)
+        sanitized.llm = ConfigSanitizer.sanitize(llm)
+        sanitized.memory = ConfigSanitizer.sanitize(memory)
+        sanitized.app = ConfigSanitizer.sanitize(app)
+        sanitized.browserExtension = ConfigSanitizer.sanitize(browserExtension)
+        sanitized.computerUse = ConfigSanitizer.sanitize(computerUse)
+        return sanitized
     }
     
     func save(to path: String) throws {
@@ -388,7 +399,105 @@ extension AppConfig {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(self)
+        let data = try encoder.encode(sanitizedForPersistence())
         try data.write(to: url, options: [.atomic])
+    }
+}
+
+enum ConfigSanitizer {
+    static func sanitize(_ config: CaptureConfig) -> CaptureConfig {
+        var sanitized = config
+        sanitized.intervalSeconds = clamped(config.intervalSeconds, min: 10, max: 300)
+        sanitized.quality = clamped(config.quality, min: 30, max: 100)
+        sanitized.maxWidth = clamped(config.maxWidth, min: 320, max: 4096)
+        sanitized.maxHeight = clamped(config.maxHeight, min: 180, max: 4096)
+        sanitized.probeIntervalSeconds = clamped(config.probeIntervalSeconds, min: 1, max: 300)
+        sanitized.minCaptureGapSeconds = clamped(config.minCaptureGapSeconds, min: 1, max: 3600)
+        sanitized.idleCaptureSeconds = clamped(config.idleCaptureSeconds, min: 30, max: 86_400)
+        sanitized.previewWidth = clamped(config.previewWidth, min: 32, max: 1024)
+        sanitized.previewHeight = clamped(config.previewHeight, min: 18, max: 1024)
+        sanitized.meaningfulChangeThreshold = clamped(config.meaningfulChangeThreshold, min: 1, max: 64)
+        sanitized.scrollCaptureCooldownSeconds = clamped(config.scrollCaptureCooldownSeconds, min: 1, max: 3600)
+        return sanitized
+    }
+
+    static func sanitize(_ config: LLMConfig) -> LLMConfig {
+        var sanitized = config
+        sanitized.baseURL = validHTTPURL(config.baseURL) ?? LLMConfig().baseURL
+        sanitized.model = nonEmpty(config.model, defaultValue: LLMConfig().model)
+        sanitized.openRouterChatModel = nonEmpty(
+            config.openRouterChatModel,
+            defaultValue: LLMConfig().openRouterChatModel
+        )
+        sanitized.openRouterAPIKey = normalized(config.openRouterAPIKey)
+        sanitized.maxTokens = clamped(config.maxTokens, min: 64, max: 64_000)
+        sanitized.temperature = clamped(config.temperature, min: 0, max: 2)
+        sanitized.timeoutSeconds = clamped(config.timeoutSeconds, min: 5, max: 300)
+        return sanitized
+    }
+
+    static func sanitize(_ config: MemoryConfig) -> MemoryConfig {
+        var sanitized = config
+        sanitized.apiKey = normalized(config.apiKey)
+        sanitized.baseURL = validHTTPURL(config.baseURL) ?? MemoryConfig.managedPgliteBaseURL
+        sanitized.userID = nonEmpty(config.userID, defaultValue: "default_user")
+        sanitized.collectionName = nonEmpty(config.collectionName, defaultValue: "screen_memories_v3")
+        return sanitized
+    }
+
+    static func sanitize(_ config: AppSettings) -> AppSettings {
+        var sanitized = config
+        sanitized.memoryWindow = clamped(config.memoryWindow, min: 1, max: 200)
+        sanitized.activePluginID = optionalNonEmpty(config.activePluginID)
+        return sanitized
+    }
+
+    static func sanitize(_ config: ExtensionConfig) -> ExtensionConfig {
+        var sanitized = config
+        sanitized.port = clamped(config.port, min: 1, max: 65_535)
+        sanitized.freshnessSeconds = clamped(config.freshnessSeconds, min: 1, max: 3600)
+        sanitized.apiKey = normalized(config.apiKey)
+        let origins = config.allowedOrigins
+            .map(normalized)
+            .filter { !$0.isEmpty }
+        sanitized.allowedOrigins = origins.isEmpty ? ExtensionConfig().allowedOrigins : Array(Set(origins)).sorted()
+        return sanitized
+    }
+
+    static func sanitize(_ config: ComputerUseConfig) -> ComputerUseConfig {
+        var sanitized = config
+        sanitized.maxImageDimension = clamped(config.maxImageDimension, min: 0, max: 4096)
+        return sanitized
+    }
+
+    static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func nonEmpty(_ value: String, defaultValue: String) -> String {
+        let normalized = normalized(value)
+        return normalized.isEmpty ? defaultValue : normalized
+    }
+
+    static func optionalNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = normalized(value)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static func validHTTPURL(_ value: String) -> String? {
+        let normalized = normalized(value).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let components = URLComponents(string: normalized),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              components.host?.isEmpty == false else {
+            return nil
+        }
+
+        return normalized
+    }
+
+    private static func clamped<T: Comparable>(_ value: T, min minimum: T, max maximum: T) -> T {
+        Swift.max(minimum, Swift.min(maximum, value))
     }
 }

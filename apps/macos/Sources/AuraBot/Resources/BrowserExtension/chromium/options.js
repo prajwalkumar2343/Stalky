@@ -20,16 +20,40 @@ async function restore() {
 }
 
 async function save() {
+  const normalizedServerURL = normalizeLocalServerURL(fields.serverURL.value);
   await chrome.storage.sync.set({
     captureEnabled: fields.captureEnabled.checked,
-    serverURL: fields.serverURL.value.trim() || DEFAULT_SETTINGS.serverURL,
+    serverURL: normalizedServerURL.value,
     apiKey: fields.apiKey.value.trim(),
     captureFullPageText: fields.captureFullPageText.checked,
     disabledDomains: fields.disabledDomains.value.trim()
   });
 
-  status.textContent = "Saved.";
+  fields.serverURL.value = normalizedServerURL.value;
+  status.textContent = normalizedServerURL.wasReset
+    ? "Saved with the default local Aura endpoint."
+    : "Saved.";
   setTimeout(() => {
     status.textContent = "";
   }, 1800);
+}
+
+function normalizeLocalServerURL(value) {
+  const normalized = String(value || "").trim() || DEFAULT_SETTINGS.serverURL;
+  let url;
+  try {
+    url = new URL(normalized);
+  } catch {
+    return { value: DEFAULT_SETTINGS.serverURL, wasReset: true };
+  }
+
+  const localHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  if (url.protocol !== "http:" || !localHosts.has(url.hostname)) {
+    return { value: DEFAULT_SETTINGS.serverURL, wasReset: true };
+  }
+
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  url.search = "";
+  url.hash = "";
+  return { value: url.toString(), wasReset: false };
 }

@@ -43,13 +43,16 @@ describe("Memory v2 schema", () => {
         const secondRun = await runMigrations(database, { embeddingDimensions: 3 });
         const second = await appliedMigrations(database);
 
-        assert.equal(first.length, 1);
+        assert.deepEqual(first.map((migration) => migration.id), [
+          "001_initial_memory_v2_schema",
+          "002_recent_context_sources",
+        ]);
         assert.deepEqual(
           second.map((migration) => migration.id),
           first.map((migration) => migration.id),
         );
         assert.deepEqual(secondRun.applied, []);
-        assert.deepEqual(secondRun.skipped, ["001_initial_memory_v2_schema"]);
+        assert.deepEqual(secondRun.skipped, first.map((migration) => migration.id));
       } finally {
         await database.close();
       }

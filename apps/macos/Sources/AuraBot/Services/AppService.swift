@@ -13,6 +13,8 @@ class AppService: ObservableObject {
     @Published var isLLMConnected: Bool = false
     @Published var isMemoryConnected: Bool = false
     @Published var isBackendConnected: Bool = false
+    @Published var llmStatusMessage: String?
+    @Published var memoryStatusMessage: String?
     @Published var captureInterval: Int = 30
     @Published var capturePermissionMessage: String?
     @Published private(set) var permissionStatuses: [AppPermissionStatus] = PermissionCenter.allStatuses()
@@ -39,6 +41,8 @@ class AppService: ObservableObject {
     
     private var contextProcessingTask: Task<Void, Never>?
     private var permissionRefreshTask: Task<Void, Never>?
+    private var screenRecordingProbeTask: Task<Void, Never>?
+    private var healthCheckTask: Task<Void, Never>?
     private var lastComputerUseStatusAutoRefreshAt: Date?
     
     init(config: AppConfig = .default) {
@@ -72,6 +76,11 @@ class AppService: ObservableObject {
     }
     
     func start() {
+        guard status != .running else {
+            updateOverlayActivityForCurrentState()
+            return
+        }
+
         status = .running
         captureEnabled = config.capture.enabled
         updateOverlayActivityForCurrentState()
@@ -96,15 +105,24 @@ class AppService: ObservableObject {
             await refreshMemories()
             await updateHealthStatus()
         }
-        
-        // Start health check polling
-        Task {
-            while status == .running {
+
+        startHealthPolling()
+    }
+
+    private func startHealthPolling() {
+        healthCheckTask?.cancel()
+        healthCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
-                guard status == .running else { break }
-                await updateHealthStatus()
+                guard let self, !Task.isCancelled, self.status == .running else { break }
+                await self.updateHealthStatus()
             }
         }
+    }
+
+    private func stopHealthPolling() {
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
     }
     
     private func updateHealthStatus() async {
@@ -113,14 +131,21 @@ class AppService: ObservableObject {
             _ = await memoryBackendSupervisor.start()
         }
         isLLMConnected = health.llm
+        llmStatusMessage = health.llm
+            ? nil
+            : "LLM service is offline. Chat and screen analysis may fail until the model endpoint is reachable."
         let memoryHealth = health.memory ? true : await memoryService.checkHealth()
         isMemoryConnected = memoryHealth
+        memoryStatusMessage = memoryHealth
+            ? nil
+            : "Memory service is offline. Aura can still run, but new context will not be saved until it reconnects."
         isBackendConnected = isLLMConnected && isMemoryConnected
     }
     
     func stop() async {
         status = .stopped
         updateOverlayActivityForCurrentState()
+        stopHealthPolling()
         stopPermissionAutoRefresh()
         stopContextProcessing()
         browserExtensionServer?.stop()
@@ -141,15 +166,39 @@ class AppService: ObservableObject {
     }
     
     func chat(message: String) async throws -> String {
-        let relevantMemories = try await memoryService.search(query: message, limit: 5)
-        let context = relevantMemories.map(\.content)
-        return try await llmService.generateResponse(message: message, memories: context)
+        let context: [String]
+
+        do {
+            let relevantMemories = try await memoryService.search(query: message, limit: 5)
+            context = relevantMemories.map(\.content)
+            memoryStatusMessage = nil
+            isMemoryConnected = true
+        } catch {
+            context = []
+            memoryStatusMessage = MemoryFailureMessage.describe(error)
+            isMemoryConnected = false
+        }
+
+        do {
+            let response = try await llmService.generateResponse(message: message, memories: context)
+            llmStatusMessage = nil
+            isLLMConnected = true
+            return response
+        } catch {
+            llmStatusMessage = LLMFailureMessage.describe(error)
+            isLLMConnected = false
+            throw error
+        }
     }
     
     func refreshMemories() async {
         do {
             memories = try await memoryService.getRecent(limit: 20)
+            memoryStatusMessage = nil
+            isMemoryConnected = true
         } catch {
+            isMemoryConnected = false
+            memoryStatusMessage = MemoryFailureMessage.describe(error)
             print("Failed to refresh memories: \(error)")
         }
     }
@@ -161,13 +210,14 @@ class AppService: ObservableObject {
     }
     
     func saveConfiguration(_ newConfig: AppConfig) async throws {
+        let sanitizedConfig = newConfig.sanitizedForPersistence()
         let wasRunning = status == .running
         if wasRunning {
             await stop()
         }
 
-        try newConfig.save(to: AppConfig.defaultURL.path)
-        await applyConfiguration(newConfig)
+        try sanitizedConfig.save(to: AppConfig.defaultURL.path)
+        await applyConfiguration(sanitizedConfig)
 
         if wasRunning {
             start()
@@ -189,6 +239,7 @@ class AppService: ObservableObject {
     func enableComputerUse() async {
         var updatedConfig = config
         updatedConfig.computerUse.enabled = true
+        updatedConfig = updatedConfig.sanitizedForPersistence()
 
         do {
             try updatedConfig.save(to: AppConfig.defaultURL.path)
@@ -230,29 +281,30 @@ class AppService: ObservableObject {
     }
 
     var permissionGuidanceMessage: String? {
-        guard !requiredPermissionsGranted else { return nil }
-
-        if let identityWarning = PermissionCenter.appIdentityWarning {
-            return identityWarning
-        }
-
-        if requiredPermissionStatuses.contains(where: { $0.kind == .screenRecording && $0.state == .pendingRestart }) {
-            return "Screen Recording was requested. After enabling it in System Settings, restart Aura from this row if macOS asks. Aura updates this status automatically."
-        }
-
-        return "Grant Screen Recording to enable visual capture. Accessibility can be enabled later for richer controls."
+        PermissionGuidance.message(
+            requiredStatuses: requiredPermissionStatuses,
+            appIdentityWarning: PermissionCenter.appIdentityWarning
+        )
     }
 
     func refreshPermissionStatuses() {
         permissionStatuses = PermissionCenter.allStatuses()
         capturePermissionMessage = permissionGuidanceMessage
 
-        Task { [weak self] in
+        screenRecordingProbeTask?.cancel()
+        screenRecordingProbeTask = Task { [weak self] in
             await PermissionCenter.updateScreenRecordingProbe()
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             self.permissionStatuses = PermissionCenter.allStatuses()
             self.capturePermissionMessage = self.permissionGuidanceMessage
         }
+    }
+
+    private func cancelPermissionTasks() {
+        permissionRefreshTask?.cancel()
+        permissionRefreshTask = nil
+        screenRecordingProbeTask?.cancel()
+        screenRecordingProbeTask = nil
     }
 
     func openSystemSettings(for kind: AppPermissionKind) {
@@ -297,8 +349,7 @@ class AppService: ObservableObject {
     }
 
     private func stopPermissionAutoRefresh() {
-        permissionRefreshTask?.cancel()
-        permissionRefreshTask = nil
+        cancelPermissionTasks()
     }
 
     private func autoRefreshPermissionStatuses() {
@@ -439,6 +490,7 @@ class AppService: ObservableObject {
     }
 
     private func applyConfiguration(_ newConfig: AppConfig) async {
+        let newConfig = newConfig.sanitizedForPersistence()
         config = newConfig
         llmService = LLMService(config: newConfig.llm)
         memoryService = MemoryService(config: newConfig.memory)
@@ -536,8 +588,17 @@ class AppService: ObservableObject {
             updateOverlayActivityForCurrentState()
         }
 
-        // Get relevant memories for context
-        let relevantMemories = try await memoryService.search(query: text, limit: 5)
+        let relevantMemories: [SearchResult]
+        do {
+            relevantMemories = try await memoryService.search(query: text, limit: 5)
+            memoryStatusMessage = nil
+            isMemoryConnected = true
+        } catch {
+            relevantMemories = []
+            memoryStatusMessage = MemoryFailureMessage.describe(error)
+            isMemoryConnected = false
+        }
+
         let memoryInfos = relevantMemories.map { 
             MemoryInfo(
                 id: $0.id,
@@ -548,8 +609,16 @@ class AppService: ObservableObject {
             )
         }
         
-        // Generate enhanced prompt using LLM
-        return try await llmService.enhancePrompt(prompt: text, memories: memoryInfos)
+        do {
+            let result = try await llmService.enhancePrompt(prompt: text, memories: memoryInfos)
+            llmStatusMessage = nil
+            isLLMConnected = true
+            return result
+        } catch {
+            llmStatusMessage = LLMFailureMessage.describe(error)
+            isLLMConnected = false
+            throw error
+        }
     }
 
     private func startContextProcessing() {
@@ -645,64 +714,96 @@ class AppService: ObservableObject {
                 metadata: event.metadata()
             )
 
+            memoryStatusMessage = nil
+            isMemoryConnected = true
             lastActivity = event.summary
             await refreshMemories()
         } catch {
+            isMemoryConnected = false
+            memoryStatusMessage = MemoryFailureMessage.describe(error)
+            lastActivity = "Context captured, but memory save failed."
             print("Failed to store context event: \(error)")
         }
     }
     
     private func processCapture(_ capture: ScreenCapture) async {
         guard config.app.processOnCapture else { return }
-        
+
+        overlayActivity = .thinking
+
+        let recentMemories: [Memory]
         do {
-            overlayActivity = .thinking
-            let recent = try await memoryService.getRecent(limit: config.app.memoryWindow)
-            var contextParts = recent.map { $0.content }
+            recentMemories = try await memoryService.getRecent(limit: config.app.memoryWindow)
+            memoryStatusMessage = nil
+            isMemoryConnected = true
+        } catch {
+            recentMemories = []
+            memoryStatusMessage = MemoryFailureMessage.describe(error)
+            isMemoryConnected = false
+            print("Failed to load memory context for capture: \(error)")
+        }
 
-            if let browserContext = capture.browserContext {
-                contextParts.append(browserContext.llmSummary)
-            }
+        var contextParts = recentMemories.map { $0.content }
 
-            let context = contextParts.joined(separator: " ")
-            
-            let analysis = try await llmService.analyzeScreen(
+        if let browserContext = capture.browserContext {
+            contextParts.append(browserContext.llmSummary)
+        }
+
+        let context = contextParts.joined(separator: " ")
+        let analysis: AnalysisResult
+
+        do {
+            analysis = try await llmService.analyzeScreen(
                 imageData: capture.imageData,
                 context: context
             )
-            
-            let content = "\(analysis.summary) | Context: \(analysis.context) | Intent: \(analysis.userIntent)"
-            
-            let metadata = Metadata(
-                timestamp: ISO8601DateFormatter().string(from: Date()),
-                context: analysis.context,
-                activities: analysis.activities,
-                keyElements: analysis.keyElements,
-                userIntent: analysis.userIntent,
-                displayNum: capture.displayNum,
-                browser: capture.browserContext?.browser,
-                url: capture.browserContext?.url,
-                captureReason: capture.captureReason,
-                visibleTextHash: capture.browserContext?.visibleTextHash,
-                readableTextHash: capture.browserContext?.readableTextHash,
-                textCaptureMode: capture.browserContext?.textCaptureMode,
-                pageTextSummary: capture.browserContext?.readableTextSummary ?? capture.browserContext?.visibleTextExcerpt,
-                browserSourceQuality: capture.browserContext?.sourceQuality.rawValue,
-                browserCaptureID: capture.browserContext?.captureID,
-                browserSchemaVersion: capture.browserContext?.schemaVersion
-            )
-            
+            llmStatusMessage = nil
+            isLLMConnected = true
+        } catch {
+            overlayActivity = .error
+            llmStatusMessage = LLMFailureMessage.describe(error)
+            isLLMConnected = false
+            print("Failed to analyze capture: \(error)")
+            return
+        }
+
+        let content = "\(analysis.summary) | Context: \(analysis.context) | Intent: \(analysis.userIntent)"
+
+        let metadata = Metadata(
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            context: analysis.context,
+            activities: analysis.activities,
+            keyElements: analysis.keyElements,
+            userIntent: analysis.userIntent,
+            displayNum: capture.displayNum,
+            browser: capture.browserContext?.browser,
+            url: capture.browserContext?.url,
+            captureReason: capture.captureReason,
+            visibleTextHash: capture.browserContext?.visibleTextHash,
+            readableTextHash: capture.browserContext?.readableTextHash,
+            textCaptureMode: capture.browserContext?.textCaptureMode,
+            pageTextSummary: capture.browserContext?.readableTextSummary ?? capture.browserContext?.visibleTextExcerpt,
+            browserSourceQuality: capture.browserContext?.sourceQuality.rawValue,
+            browserCaptureID: capture.browserContext?.captureID,
+            browserSchemaVersion: capture.browserContext?.schemaVersion
+        )
+
+        do {
             _ = try await memoryService.add(content: content, metadata: metadata)
-            
+            memoryStatusMessage = nil
+            isMemoryConnected = true
+
             await MainActor.run {
                 lastActivity = analysis.summary
             }
-            
+
             await refreshMemories()
-            
         } catch {
             overlayActivity = .error
-            print("Failed to process capture: \(error)")
+            memoryStatusMessage = MemoryFailureMessage.describe(error)
+            isMemoryConnected = false
+            lastActivity = "Screen analyzed, but memory save failed."
+            print("Failed to store analyzed capture: \(error)")
         }
     }
 

@@ -54,7 +54,7 @@ actor ComputerUseService {
         return ComputerUseStatus(
             state: .needsPermission,
             permissions: permissions,
-            message: "AuraBot needs Accessibility and Screen Recording permission for Computer Use."
+            message: ComputerUsePermissionParser.guidanceMessage(for: permissions)
         )
     }
 
@@ -197,7 +197,7 @@ actor ComputerUseService {
             return ComputerUseStatus(
                 state: .needsPermission,
                 permissions: permissions,
-                message: "AuraBot needs Accessibility and Screen Recording permission for Computer Use."
+                message: ComputerUsePermissionParser.guidanceMessage(for: permissions)
             )
         }
 
@@ -266,39 +266,13 @@ actor ComputerUseService {
         }
 
         return ComputerUsePermissionStatus(
-            accessibility: permissionLineValue(label: "Accessibility", in: result.output),
-            screenRecording: permissionLineValue(label: "Screen Recording", in: result.output)
+            accessibility: ComputerUsePermissionParser.permissionLineValue(label: "Accessibility", in: result.output),
+            screenRecording: ComputerUsePermissionParser.permissionLineValue(label: "Screen Recording", in: result.output)
         )
     }
 
-    private func permissionLineValue(label: String, in text: String) -> Bool {
-        let label = label.lowercased()
-        for line in text.components(separatedBy: .newlines) {
-            let lower = line.lowercased()
-            guard lower.contains(label) else { continue }
-            if lower.contains("not granted") || lower.contains("denied") || lower.contains("missing") {
-                return false
-            }
-            if lower.contains("granted") || lower.contains("authorized") || lower.contains("allowed") {
-                return true
-            }
-        }
-        return false
-    }
-
     private func boolValue(_ value: ComputerUseArgument?) -> Bool {
-        switch value {
-        case .bool(let bool):
-            return bool
-        case .string(let string):
-            return ["true", "granted", "authorized", "allowed", "yes"].contains(string.lowercased())
-        case .int(let int):
-            return int != 0
-        case .double(let double):
-            return double != 0
-        default:
-            return false
-        }
+        ComputerUsePermissionParser.boolValue(value)
     }
 
     private func failedStatus(_ error: Error) -> ComputerUseStatus {
@@ -327,5 +301,89 @@ actor ComputerUseService {
             .replacingOccurrences(of: "CuaDriver", with: "AuraBot Computer Use")
             .replacingOccurrences(of: "cua-driver", with: "AuraBot Computer Use")
             .replacingOccurrences(of: "com.trycua.driver", with: "AuraBot")
+    }
+}
+
+enum ComputerUsePermissionParser {
+    private static let negativePhrases = [
+        "not granted",
+        "not authorized",
+        "not allowed",
+        "not trusted",
+        "denied",
+        "missing",
+        "false",
+        "no",
+        "disabled"
+    ]
+
+    private static let positivePhrases = [
+        "granted",
+        "authorized",
+        "allowed",
+        "trusted",
+        "true",
+        "yes",
+        "enabled"
+    ]
+
+    static func permissionLineValue(label: String, in text: String) -> Bool {
+        let normalizedLabel = normalized(label)
+        for line in text.components(separatedBy: .newlines) {
+            let lower = normalized(line)
+            guard lower.contains(normalizedLabel) else { continue }
+            if containsAny(lower, phrases: negativePhrases) {
+                return false
+            }
+            if containsAny(lower, phrases: positivePhrases) {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func boolValue(_ value: ComputerUseArgument?) -> Bool {
+        switch value {
+        case .bool(let bool):
+            return bool
+        case .string(let string):
+            let lower = normalized(string)
+            if containsAny(lower, phrases: negativePhrases) {
+                return false
+            }
+            return containsAny(lower, phrases: positivePhrases)
+        case .int(let int):
+            return int != 0
+        case .double(let double):
+            return double != 0
+        default:
+            return false
+        }
+    }
+
+    static func guidanceMessage(for permissions: ComputerUsePermissionStatus) -> String {
+        switch (permissions.accessibility, permissions.screenRecording) {
+        case (false, false):
+            return "AuraBot needs Accessibility and Screen Recording permission for Computer Use."
+        case (false, true):
+            return "AuraBot needs Accessibility permission to inspect and control app windows."
+        case (true, false):
+            return "AuraBot needs Screen Recording permission to capture window state for Computer Use."
+        case (true, true):
+            return "Computer Use is ready."
+        }
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"[_\s-]+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private static func containsAny(_ value: String, phrases: [String]) -> Bool {
+        phrases.contains { phrase in
+            value == phrase || value.contains(phrase)
+        }
     }
 }

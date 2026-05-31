@@ -159,6 +159,7 @@ struct SettingsView: View {
             }
             updatedConfig.app.overlayPosition = overlayPosition
             updatedConfig.app.overlayShowsOverFullScreenApps = overlayShowsOverFullScreenApps
+            updatedConfig = updatedConfig.sanitizedForPersistence()
 
             do {
                 try await service.saveConfiguration(updatedConfig)

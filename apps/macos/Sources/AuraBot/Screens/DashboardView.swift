@@ -218,7 +218,7 @@ struct StatsGrid: View {
             DashboardStatCard(
                 title: "LLM",
                 value: service.isLLMConnected ? "Online" : "Offline",
-                detail: service.config.llm.model.isEmpty ? "No model set" : service.config.llm.model,
+                detail: service.llmStatusMessage ?? (service.config.llm.model.isEmpty ? "No model set" : service.config.llm.model),
                 icon: "sparkles",
                 color: service.isLLMConnected ? Colors.success : Colors.warning
             )
@@ -226,7 +226,7 @@ struct StatsGrid: View {
             DashboardStatCard(
                 title: "Memory API",
                 value: service.isMemoryConnected ? "Online" : "Offline",
-                detail: service.config.memory.collectionName,
+                detail: service.memoryStatusMessage ?? service.config.memory.collectionName,
                 icon: "server.rack",
                 color: service.isMemoryConnected ? Colors.primary : Colors.accent
             )

@@ -22,6 +22,7 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 NOTARY_APPLE_ID="${NOTARY_APPLE_ID:-}"
 NOTARY_PASSWORD="${NOTARY_PASSWORD:-}"
 NOTARY_TEAM_ID="${NOTARY_TEAM_ID:-}"
+APP_ONLY="${AURABOT_APP_ONLY:-0}"
 APP_BUNDLE="${APP_NAME}.app"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 RW_DMG_NAME="${APP_NAME}-${VERSION}-temp.dmg"
@@ -32,10 +33,11 @@ DMG_MOUNT_POINT=""
 
 usage() {
     cat <<EOF
-Usage: AURABOT_BUILD_MODE=dev|release ./scripts/build-app.sh
+Usage: AURABOT_BUILD_MODE=dev|release ./scripts/build-app.sh [--app-only]
 
 Environment:
   AURABOT_BUILD_MODE        dev (default) or release
+  AURABOT_APP_ONLY          1 to stop after creating and signing AuraBot.app
   DEVELOPER_ID_APPLICATION Developer ID Application signing identity for release
   AURABOT_NOTARIZE         1 to submit the release DMG to Apple notary service
   NOTARY_PROFILE           notarytool keychain profile name, preferred
@@ -55,6 +57,9 @@ for ARG in "$@"; do
             ;;
         --notarize)
             NOTARIZE="1"
+            ;;
+        --app-only)
+            APP_ONLY="1"
             ;;
         --help|-h)
             usage
@@ -264,6 +269,17 @@ echo -e "${YELLOW}🔏 Signing app bundle...${NC}"
 sign_code "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" "${BUNDLE_ID}" --entitlements AuraBot.entitlements
 sign_code "${APP_BUNDLE}" "" --entitlements AuraBot.entitlements
 codesign --verify --strict --deep "${APP_BUNDLE}"
+
+if [ "${APP_ONLY}" = "1" ]; then
+    echo ""
+    echo -e "${GREEN}✅ Done!${NC}"
+    echo ""
+    echo "Files created:"
+    echo "  - ${APP_BUNDLE}/ (test locally)"
+    echo ""
+    echo "Test: open '${APP_BUNDLE}'"
+    exit 0
+fi
 
 # Zip it
 echo -e "${YELLOW}📦 Creating zip...${NC}"

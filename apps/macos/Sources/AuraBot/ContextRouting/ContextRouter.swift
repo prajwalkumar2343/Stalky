@@ -78,7 +78,7 @@ actor ContextRouter {
         now: Date,
         force: Bool
     ) -> ContextCapturePlan {
-        let fingerprint = "browser|\(browserContext.sessionKey)|\(browserContext.viewportSignature ?? "")|\(browserContext.activity.rawValue)"
+        let fingerprint = Self.browserEventFingerprint(for: browserContext)
         let summary = browserContext.llmSummary
         let event = ContextEvent(
             mode: .browserResearch,
@@ -104,6 +104,21 @@ actor ContextRouter {
         )
 
         return structuredPlan(event, confidence: browserConfidence(for: browserContext), force: force)
+    }
+
+    static func browserEventFingerprint(for browserContext: BrowserContext) -> String {
+        [
+            "browser",
+            browserContext.sessionKey,
+            browserContext.activity.rawValue,
+            browserContext.mediaIsPlaying ? "playing" : "paused",
+            browserContext.viewportSignature ?? "",
+            browserContext.visibleTextHash ?? "",
+            browserContext.readableTextHash ?? "",
+            browserContext.textCaptureMode ?? "",
+            browserContext.sourceQuality.rawValue,
+            browserContext.privateWindow ? "private" : "regular"
+        ].joined(separator: "|")
     }
 
     private func planTerminalContext(
