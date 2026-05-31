@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import CoreGraphics
-@preconcurrency import ScreenCaptureKit
 
 enum AppPermissionKind: String, CaseIterable, Identifiable, Hashable, Codable, Sendable {
     case screenRecording
@@ -72,9 +71,9 @@ enum AppPermissionKind: String, CaseIterable, Identifiable, Hashable, Codable, S
 
     var isRequired: Bool {
         switch self {
-        case .screenRecording, .accessibility:
+        case .screenRecording:
             return true
-        case .microphone:
+        case .accessibility, .microphone:
             return false
         }
     }
@@ -141,8 +140,10 @@ enum AppPermissionState: Equatable {
 
 @MainActor
 enum PermissionCenter {
-    private static var requestedKinds = Set<AppPermissionKind>()
-    private static var screenCaptureProbeGranted = false
+    private static let requestedKindsDefaultsKey = "AuraBotRequestedPermissionKinds"
+    private static var requestedKinds = loadRequestedKinds()
+    private static var cachedAppIdentityWarning: String?
+    private static var checkedAppIdentity = false
 
     static func allStatuses() -> [AppPermissionStatus] {
         AppPermissionKind.allCases.map(status(for:))
@@ -156,7 +157,7 @@ enum PermissionCenter {
         switch kind {
         case .screenRecording:
             if hasScreenRecordingAccess() {
-                requestedKinds.remove(kind)
+                clearRequested(kind)
                 return .granted
             }
 
@@ -180,23 +181,13 @@ enum PermissionCenter {
     }
 
     static func updateScreenRecordingProbe() async {
-        guard !CGPreflightScreenCaptureAccess() else {
-            screenCaptureProbeGranted = true
-            requestedKinds.remove(.screenRecording)
-            return
-        }
-
-        do {
-            _ = try await SCShareableContent.current
-            screenCaptureProbeGranted = true
-            requestedKinds.remove(.screenRecording)
-        } catch {
-            screenCaptureProbeGranted = false
+        if CGPreflightScreenCaptureAccess() {
+            clearRequested(.screenRecording)
         }
     }
 
     private static func hasScreenRecordingAccess() -> Bool {
-        CGPreflightScreenCaptureAccess() || screenCaptureProbeGranted
+        CGPreflightScreenCaptureAccess()
     }
 
     static var appIdentityWarning: String? {
@@ -211,30 +202,47 @@ enum PermissionCenter {
             return "Aura is running outside Applications. Move AuraBot.app to Applications and open that copy before granting permissions to avoid duplicate macOS privacy entries."
         }
 
-        return nil
+        if checkedAppIdentity {
+            return cachedAppIdentityWarning
+        }
+
+        cachedAppIdentityWarning = codeSignatureWarning(for: bundleURL)
+        checkedAppIdentity = true
+        return cachedAppIdentityWarning
     }
 
     static func requestAccess(for kind: AppPermissionKind) {
         guard !isGranted(kind) else {
-            requestedKinds.remove(kind)
+            clearRequested(kind)
             return
         }
 
         switch kind {
         case .screenRecording:
-            requestedKinds.insert(kind)
-            _ = CGRequestScreenCaptureAccess()
+            markRequested(kind)
+            let granted = CGRequestScreenCaptureAccess()
+            if granted {
+                if CGPreflightScreenCaptureAccess() {
+                    clearRequested(kind)
+                }
+                return
+            }
             openSystemSettings(for: kind)
         case .accessibility:
             let trusted = SystemAccessibilityPermissionChecker().isTrusted(prompt: true)
             if trusted {
-                requestedKinds.remove(kind)
+                clearRequested(kind)
             } else {
                 openSystemSettings(for: kind)
             }
         case .microphone:
             switch AVCaptureDevice.authorizationStatus(for: .audio) {
             case .notDetermined:
+                guard hasUsageDescription("NSMicrophoneUsageDescription") else {
+                    openSystemSettings(for: kind)
+                    return
+                }
+
                 AVCaptureDevice.requestAccess(for: .audio) { granted in
                     guard !granted else { return }
                     Task { @MainActor in
@@ -244,7 +252,7 @@ enum PermissionCenter {
             case .denied, .restricted:
                 openSystemSettings(for: kind)
             case .authorized:
-                requestedKinds.remove(kind)
+                clearRequested(kind)
             @unknown default:
                 openSystemSettings(for: kind)
             }
@@ -259,6 +267,61 @@ enum PermissionCenter {
 
         NSWorkspace.shared.open(url)
     }
+
+    private static func markRequested(_ kind: AppPermissionKind) {
+        requestedKinds.insert(kind)
+        persistRequestedKinds()
+    }
+
+    private static func clearRequested(_ kind: AppPermissionKind) {
+        requestedKinds.remove(kind)
+        persistRequestedKinds()
+    }
+
+    private static func loadRequestedKinds() -> Set<AppPermissionKind> {
+        let rawValues = UserDefaults.standard.stringArray(forKey: requestedKindsDefaultsKey) ?? []
+        return Set(rawValues.compactMap(AppPermissionKind.init(rawValue:)))
+    }
+
+    private static func persistRequestedKinds() {
+        UserDefaults.standard.set(
+            requestedKinds.map(\.rawValue).sorted(),
+            forKey: requestedKindsDefaultsKey
+        )
+    }
+
+    private static func hasUsageDescription(_ key: String) -> Bool {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+            return false
+        }
+
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func codeSignatureWarning(for bundleURL: URL) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["-d", "--verbose=4", bundleURL.path]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return "Aura could not verify its code signature. Use a Developer ID signed and notarized build so macOS can preserve privacy permissions reliably."
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        if output.contains("Signature=adhoc") || output.contains("TeamIdentifier=not set") {
+            return "Aura is running from a local ad-hoc build. macOS may not preserve Screen Recording reliably across rebuilds; use a Developer ID signed and notarized build for stable permissions."
+        }
+
+        return nil
+    }
 }
 
 @available(macOS 14.0, *)
@@ -267,8 +330,6 @@ struct PermissionOnboardingView: View {
     @State private var selectedStep: OnboardingStep = .welcome
     @State private var isCompleting = false
     @State private var completionError: String?
-
-    private let statusTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     private var requiredStatuses: [AppPermissionStatus] {
         service.permissionStatuses.filter { $0.kind.isRequired }
@@ -318,9 +379,6 @@ struct PermissionOnboardingView: View {
                         onRequest: { kind in
                             service.requestPermission(kind)
                         },
-                        onRefresh: {
-                            service.refreshPermissionStatuses()
-                        },
                         onContinue: {
                             move(to: .browserExtension)
                         }
@@ -345,9 +403,6 @@ struct PermissionOnboardingView: View {
         .onAppear {
             service.refreshPermissionStatuses()
             selectedStep = service.requiredPermissionsGranted ? .browserExtension : .welcome
-        }
-        .onReceive(statusTimer) { _ in
-            service.refreshPermissionStatuses()
         }
         .onChange(of: allRequiredGranted) { _, granted in
             guard granted, selectedStep == .permissions else { return }
@@ -500,7 +555,7 @@ private struct OnboardingWelcomeScreen: View {
                             .foregroundColor(Colors.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        Text("Aura needs a small set of macOS permissions before it can understand your workspace. The next screen checks status as you return from System Settings and shows when a restart is needed.")
+                        Text("Aura needs Screen Recording before it can visually understand your workspace. The next screen checks status as you return from System Settings and shows when a restart is needed.")
                             .font(Typography.body)
                             .foregroundColor(Colors.textSecondary)
                             .frame(maxWidth: 560, alignment: .leading)
@@ -530,7 +585,6 @@ private struct OnboardingPermissionsScreen: View {
     let progressValue: Double
     let guidanceMessage: String?
     let onRequest: (AppPermissionKind) -> Void
-    let onRefresh: () -> Void
     let onContinue: () -> Void
 
     private var allRequiredGranted: Bool {
@@ -552,11 +606,11 @@ private struct OnboardingPermissionsScreen: View {
                     onboardingBadge("Live Status", icon: "arrow.triangle.2.circlepath")
 
                     VStack(alignment: .leading, spacing: Spacing.sm) {
-                        Text("Grant required permissions.")
+                        Text("Grant Screen Recording.")
                             .font(Typography.title1)
                             .foregroundColor(Colors.textPrimary)
 
-                        Text(guidanceMessage ?? "Aura unlocks once Screen Recording and Accessibility are enabled.")
+                        Text(guidanceMessage ?? "Aura unlocks once Screen Recording is enabled.")
                             .font(Typography.callout)
                             .foregroundColor(Colors.textSecondary)
                     }
@@ -592,18 +646,14 @@ private struct OnboardingPermissionsScreen: View {
                         progressValue: progressValue
                     )
 
-                    HStack(spacing: Spacing.md) {
-                        SecondaryButton("Refresh", icon: "arrow.clockwise") {
-                            onRefresh()
-                        }
-
+                    Group {
                         GradientButton(allRequiredGranted ? "Continue" : "Waiting", icon: allRequiredGranted ? "arrow.right" : "hourglass") {
                             guard allRequiredGranted else {
-                                onRefresh()
                                 return
                             }
                             onContinue()
                         }
+                        .disabled(!allRequiredGranted)
                     }
                 }
                 .frame(width: 260)

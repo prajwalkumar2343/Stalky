@@ -66,7 +66,7 @@ struct MainContentView: View {
             SidebarView(selectedTab: $selectedTab, service: service)
             
             ZStack {
-                if service.needsOnboarding {
+                if service.needsOnboarding, selectedTab != .settings {
                     PermissionOnboardingView(service: service)
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 } else if case let .pluginWorkspace(pluginID, name) = service.appPresentation.mode {

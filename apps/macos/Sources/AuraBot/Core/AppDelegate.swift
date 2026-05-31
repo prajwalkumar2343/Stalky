@@ -18,15 +18,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         service.start()
 
-        overlayWindow = OverlayWindow(position: service.config.app.overlayPosition)
+        overlayWindow = OverlayWindow(
+            position: service.config.app.overlayPosition,
+            customOrigin: service.config.app.overlayOrigin,
+            showsOverFullScreenApps: service.config.app.overlayShowsOverFullScreenApps,
+            onOriginChanged: { [weak service] origin in
+                service?.persistOverlayOrigin(origin)
+            }
+        )
         overlayWindow?.showPersistent()
 
         service.$config
-            .map(\.app.overlayPosition)
-            .removeDuplicates()
-            .sink { [weak self] position in
-                self?.overlayWindow?.update(position: position)
+            .sink { [weak self] config in
+                self?.overlayWindow?.update(
+                    position: config.app.overlayPosition,
+                    customOrigin: config.app.overlayOrigin,
+                    showsOverFullScreenApps: config.app.overlayShowsOverFullScreenApps
+                )
                 self?.overlayWindow?.showPersistent()
+            }
+            .store(in: &cancellables)
+
+        service.$overlayActivity
+            .removeDuplicates()
+            .sink { [weak self] activity in
+                self?.overlayWindow?.update(activity: activity)
             }
             .store(in: &cancellables)
     }

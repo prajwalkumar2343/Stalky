@@ -23,6 +23,7 @@ class AppService: ObservableObject {
     @Published private(set) var pluginCatalogStatus: PluginCatalogStatus = .idle
     @Published private(set) var activePlugin: InstalledPluginRecord?
     @Published private(set) var computerUseStatus: ComputerUseStatus = .disabled
+    @Published private(set) var overlayActivity: OverlayActivity = .idle
     
     @Published private(set) var config: AppConfig
     private let pluginHost = PluginHost()
@@ -38,6 +39,7 @@ class AppService: ObservableObject {
     
     private var contextProcessingTask: Task<Void, Never>?
     private var permissionRefreshTask: Task<Void, Never>?
+    private var lastComputerUseStatusAutoRefreshAt: Date?
     
     init(config: AppConfig = .default) {
         self.config = config
@@ -72,8 +74,10 @@ class AppService: ObservableObject {
     func start() {
         status = .running
         captureEnabled = config.capture.enabled
+        updateOverlayActivityForCurrentState()
         captureInterval = config.capture.intervalSeconds
         refreshPermissionStatuses()
+        startPermissionAutoRefresh()
         browserExtensionServer?.start()
         Task {
             await refreshComputerUseStatus()
@@ -116,6 +120,8 @@ class AppService: ObservableObject {
     
     func stop() async {
         status = .stopped
+        updateOverlayActivityForCurrentState()
+        stopPermissionAutoRefresh()
         stopContextProcessing()
         browserExtensionServer?.stop()
         await memoryBackendSupervisor.stop()
@@ -125,19 +131,13 @@ class AppService: ObservableObject {
     func toggleCapture() {
         refreshPermissionStatuses()
 
-        guard requiredPermissionsGranted else {
-            capturePermissionMessage = permissionGuidanceMessage
-            return
-        }
-
-        capturePermissionMessage = nil
-
         captureEnabled.toggle()
         if captureEnabled {
             startContextProcessing()
         } else {
             stopContextProcessing()
         }
+        updateOverlayActivityForCurrentState()
     }
     
     func chat(message: String) async throws -> String {
@@ -171,6 +171,18 @@ class AppService: ObservableObject {
 
         if wasRunning {
             start()
+        }
+    }
+
+    func persistOverlayOrigin(_ origin: OverlayOrigin) {
+        var updatedConfig = config
+        updatedConfig.app.overlayOrigin = origin
+
+        do {
+            try updatedConfig.save(to: AppConfig.defaultURL.path)
+            config = updatedConfig
+        } catch {
+            print("Failed to persist overlay origin: \(error)")
         }
     }
 
@@ -225,10 +237,10 @@ class AppService: ObservableObject {
         }
 
         if requiredPermissionStatuses.contains(where: { $0.kind == .screenRecording && $0.state == .pendingRestart }) {
-            return "Screen Recording was requested. After enabling it in System Settings, restart Aura from this row, then refresh status if needed."
+            return "Screen Recording was requested. After enabling it in System Settings, restart Aura from this row if macOS asks. Aura updates this status automatically."
         }
 
-        return "Grant Screen Recording and Accessibility to enable capture. Aura refreshes status when you return from System Settings."
+        return "Grant Screen Recording to enable visual capture. Accessibility can be enabled later for richer controls."
     }
 
     func refreshPermissionStatuses() {
@@ -255,7 +267,7 @@ class AppService: ObservableObject {
 
         PermissionCenter.requestAccess(for: kind)
         refreshPermissionStatuses()
-        schedulePermissionStatusRefreshes()
+        startPermissionAutoRefresh()
     }
 
     func completeOnboarding() async throws {
@@ -271,22 +283,42 @@ class AppService: ObservableObject {
         refreshPermissionStatuses()
     }
 
-    private func schedulePermissionStatusRefreshes() {
+    private func startPermissionAutoRefresh() {
         permissionRefreshTask?.cancel()
         permissionRefreshTask = Task { [weak self] in
-            let delays: [UInt64] = [
-                500_000_000,
-                1_500_000_000,
-                3_000_000_000,
-                6_000_000_000
-            ]
+            self?.autoRefreshPermissionStatuses()
 
-            for delay in delays {
-                try? await Task.sleep(nanoseconds: delay)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { return }
-                self?.refreshPermissionStatuses()
+                self?.autoRefreshPermissionStatuses()
             }
         }
+    }
+
+    private func stopPermissionAutoRefresh() {
+        permissionRefreshTask?.cancel()
+        permissionRefreshTask = nil
+    }
+
+    private func autoRefreshPermissionStatuses() {
+        refreshPermissionStatuses()
+
+        guard config.computerUse.enabled, shouldRefreshComputerUseStatusNow() else { return }
+        Task { [weak self] in
+            await self?.refreshComputerUseStatus()
+        }
+    }
+
+    private func shouldRefreshComputerUseStatusNow() -> Bool {
+        let now = Date()
+        if let lastComputerUseStatusAutoRefreshAt,
+           now.timeIntervalSince(lastComputerUseStatusAutoRefreshAt) < 10 {
+            return false
+        }
+
+        lastComputerUseStatusAutoRefreshAt = now
+        return true
     }
 
     var browserExtensionServerURL: String {
@@ -385,8 +417,6 @@ class AppService: ObservableObject {
         let fileManager = FileManager.default
 
         let bundledCandidates = [
-            Bundle.module.resourceURL?.appendingPathComponent("BrowserExtension/chromium", isDirectory: true),
-            Bundle.module.resourceURL?.appendingPathComponent("chromium", isDirectory: true),
             Bundle.main.resourceURL?.appendingPathComponent("BrowserExtension/chromium", isDirectory: true),
             Bundle.main.resourceURL?.appendingPathComponent("chromium", isDirectory: true)
         ].compactMap { $0 }
@@ -478,15 +508,34 @@ class AppService: ObservableObject {
     }
 
     private func relaunchHost() {
-        guard let bundleURL = Bundle.main.bundleURL as URL? else { return }
+        let bundlePath = Bundle.main.bundleURL.path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "sleep 0.8; /usr/bin/open -n \"$1\"",
+            "aurabot-relaunch",
+            bundlePath
+        ]
 
-        let configuration = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, _ in
+        do {
+            try process.run()
             NSApp.terminate(nil)
+        } catch {
+            NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: .init()) { _, _ in
+                NSApp.terminate(nil)
+            }
         }
     }
     
     func enhance(text: String) async throws -> EnhancementResult {
+        let previousActivity = overlayActivity
+        overlayActivity = .working
+        defer {
+            overlayActivity = previousActivity
+            updateOverlayActivityForCurrentState()
+        }
+
         // Get relevant memories for context
         let relevantMemories = try await memoryService.search(query: text, limit: 5)
         let memoryInfos = relevantMemories.map { 
@@ -533,24 +582,60 @@ class AppService: ObservableObject {
 
     private func processContextTick(force: Bool) async {
         guard config.app.processOnCapture else { return }
-        guard requiredPermissionsGranted else { return }
 
+        overlayActivity = .listening
         let plan = await contextRouter.capturePlan(force: force)
 
         switch plan.screenshotDirective {
         case .skip:
             guard let event = plan.event else { return }
+            overlayActivity = .thinking
             await storeContextEvent(event)
         case .fallback:
+            guard await canAttemptVisualCapture() else {
+                if let event = plan.event {
+                    overlayActivity = .thinking
+                    await storeContextEvent(event)
+                }
+                updateOverlayActivityForCurrentState()
+                return
+            }
+
+            overlayActivity = .working
             guard let capture = await captureService?.captureDisplay(
                 displayID: CGMainDisplayID(),
                 browserContext: plan.browserContext,
                 reason: plan.reason
             ) else {
+                if let failureMessage = await captureService?.lastCaptureFailureMessage() {
+                    capturePermissionMessage = failureMessage
+                }
+                if let event = plan.event {
+                    overlayActivity = .thinking
+                    await storeContextEvent(event)
+                }
+                updateOverlayActivityForCurrentState()
                 return
             }
+            permissionStatuses = PermissionCenter.allStatuses()
+            capturePermissionMessage = permissionGuidanceMessage
             await processCapture(capture)
         }
+
+        updateOverlayActivityForCurrentState()
+    }
+
+    private func canAttemptVisualCapture() async -> Bool {
+        await PermissionCenter.updateScreenRecordingProbe()
+        permissionStatuses = PermissionCenter.allStatuses()
+
+        if PermissionCenter.isGranted(.screenRecording) {
+            capturePermissionMessage = permissionGuidanceMessage
+            return true
+        }
+
+        capturePermissionMessage = "Screen Recording is unavailable. Aura will keep saving structured app/browser context; enable Screen Recording in System Settings, then restart Aura if macOS asks."
+        return false
     }
 
     private func storeContextEvent(_ event: ContextEvent) async {
@@ -571,6 +656,7 @@ class AppService: ObservableObject {
         guard config.app.processOnCapture else { return }
         
         do {
+            overlayActivity = .thinking
             let recent = try await memoryService.getRecent(limit: config.app.memoryWindow)
             var contextParts = recent.map { $0.content }
 
@@ -615,9 +701,27 @@ class AppService: ObservableObject {
             await refreshMemories()
             
         } catch {
+            overlayActivity = .error
             print("Failed to process capture: \(error)")
         }
     }
+
+    private func updateOverlayActivityForCurrentState() {
+        guard status == .running else {
+            overlayActivity = .idle
+            return
+        }
+
+        overlayActivity = captureEnabled ? .listening : .idle
+    }
+}
+
+enum OverlayActivity: String, Equatable, Sendable {
+    case idle
+    case listening
+    case thinking
+    case working
+    case error
 }
 
 enum PluginInstallError: Error, Equatable {

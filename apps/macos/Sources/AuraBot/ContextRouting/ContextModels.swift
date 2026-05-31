@@ -68,6 +68,9 @@ struct ContextEvent: Sendable {
     let ttl: String
     let fingerprint: String
     let timestamp: Date
+    let activeApp: ActiveAppSnapshot?
+    let gitContext: GitContext?
+    let filePath: String?
     let browserContext: BrowserContext?
     let captureReason: String
 
@@ -105,7 +108,12 @@ struct ContextEvent: Sendable {
             pageTextSummary: browserContext?.readableTextSummary ?? browserContext?.visibleTextExcerpt,
             browserSourceQuality: browserContext?.sourceQuality.rawValue,
             browserCaptureID: browserContext?.captureID,
-            browserSchemaVersion: browserContext?.schemaVersion
+            browserSchemaVersion: browserContext?.schemaVersion,
+            appName: activeApp?.name ?? browserContext?.browser,
+            windowTitle: activeApp?.windowTitle ?? browserContext?.title,
+            bundleIdentifier: activeApp?.bundleIdentifier ?? browserContext?.bundleIdentifier,
+            repoPath: gitContext?.rootPath,
+            filePath: filePath
         )
     }
 }

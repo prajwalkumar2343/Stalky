@@ -294,6 +294,11 @@ struct Metadata: Codable, Sendable {
     let browserSourceQuality: String?
     let browserCaptureID: String?
     let browserSchemaVersion: Int?
+    let appName: String?
+    let windowTitle: String?
+    let bundleIdentifier: String?
+    let repoPath: String?
+    let filePath: String?
 
     enum CodingKeys: String, CodingKey {
         case timestamp
@@ -312,6 +317,11 @@ struct Metadata: Codable, Sendable {
         case browserSourceQuality = "browser_source_quality"
         case browserCaptureID = "browser_capture_id"
         case browserSchemaVersion = "browser_schema_version"
+        case appName = "app_name"
+        case windowTitle = "window_title"
+        case bundleIdentifier = "bundle_identifier"
+        case repoPath = "repo_path"
+        case filePath = "file_path"
     }
 
     init(
@@ -330,7 +340,12 @@ struct Metadata: Codable, Sendable {
         pageTextSummary: String? = nil,
         browserSourceQuality: String? = nil,
         browserCaptureID: String? = nil,
-        browserSchemaVersion: Int? = nil
+        browserSchemaVersion: Int? = nil,
+        appName: String? = nil,
+        windowTitle: String? = nil,
+        bundleIdentifier: String? = nil,
+        repoPath: String? = nil,
+        filePath: String? = nil
     ) {
         self.timestamp = timestamp
         self.context = context
@@ -348,6 +363,11 @@ struct Metadata: Codable, Sendable {
         self.browserSourceQuality = browserSourceQuality
         self.browserCaptureID = browserCaptureID
         self.browserSchemaVersion = browserSchemaVersion
+        self.appName = appName
+        self.windowTitle = windowTitle
+        self.bundleIdentifier = bundleIdentifier
+        self.repoPath = repoPath
+        self.filePath = filePath
     }
 
     init(from decoder: Decoder) throws {
@@ -368,6 +388,11 @@ struct Metadata: Codable, Sendable {
         browserSourceQuality = try container.decodeIfPresent(String.self, forKey: .browserSourceQuality)
         browserCaptureID = try container.decodeIfPresent(String.self, forKey: .browserCaptureID)
         browserSchemaVersion = try container.decodeIfPresent(Int.self, forKey: .browserSchemaVersion)
+        appName = try container.decodeIfPresent(String.self, forKey: .appName)
+        windowTitle = try container.decodeIfPresent(String.self, forKey: .windowTitle)
+        bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+        repoPath = try container.decodeIfPresent(String.self, forKey: .repoPath)
+        filePath = try container.decodeIfPresent(String.self, forKey: .filePath)
     }
 }
 

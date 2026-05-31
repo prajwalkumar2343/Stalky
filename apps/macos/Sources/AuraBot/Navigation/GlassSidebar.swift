@@ -20,16 +20,14 @@ struct SidebarView: View {
                     title: "Dashboard",
                     icon: "square.grid.2x2",
                     tab: .dashboard,
-                    selectedTab: $selectedTab,
-                    isDisabled: service.needsOnboarding
+                    selectedTab: $selectedTab
                 )
                 
                 NavButton(
                     title: "Memories",
                     icon: "bubble.left.and.bubble.right",
                     tab: .memories,
-                    selectedTab: $selectedTab,
-                    isDisabled: service.needsOnboarding
+                    selectedTab: $selectedTab
                 )
 
                 NavButton(

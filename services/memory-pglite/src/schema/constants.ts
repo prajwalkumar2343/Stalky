@@ -60,7 +60,8 @@ export const RECENT_CONTEXT_SOURCES = [
   "browser",
   "repo",
   "file",
-  "manual",
+  "terminal",
+  "system",
 ] as const;
 
 export const BRAIN_CHUNK_TYPES = ["frontmatter", "compiled_truth", "timeline"] as const;

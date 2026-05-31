@@ -1,6 +1,6 @@
 import Foundation
 import CoreGraphics
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import AppKit
 
 @available(macOS 12.3, *)
@@ -14,6 +14,7 @@ actor ScreenCaptureService {
     private var lastAcceptedViewportSignature: String?
     private var lastAcceptedMediaSession: String?
     private var lastAcceptedAt: Date?
+    private var lastCaptureErrorMessage: String?
     
     var onCapture: (@MainActor (ScreenCapture) async -> Void)?
     
@@ -42,6 +43,10 @@ actor ScreenCaptureService {
     
     func capturePrimary() async -> ScreenCapture? {
         await captureDisplay(displayID: CGMainDisplayID(), browserContext: nil, reason: "manual")
+    }
+
+    func lastCaptureFailureMessage() -> String? {
+        lastCaptureErrorMessage
     }
     
     private func runCaptureLoop() async {
@@ -79,48 +84,45 @@ actor ScreenCaptureService {
     }
 
     func captureDisplay(displayID: CGDirectDisplayID, browserContext: BrowserContext?, reason: String?) async -> ScreenCapture? {
-        do {
-            guard let image = await captureImage(
-                displayID: displayID,
-                maxWidth: config.maxWidth,
-                maxHeight: config.maxHeight
-            ) else {
-                return nil
-            }
-
-            guard let data = image.jpegData(compressionQuality: Double(config.quality) / 100.0) else {
-                return nil
-            }
-            
-            let capture = ScreenCapture(
-                displayID: displayID,
-                imageData: data,
-                timestamp: Date(),
-                displayNum: 1,
-                browserContext: browserContext,
-                captureReason: reason
-            )
-
-            lastAcceptedFingerprint = image.differenceHash()
-            lastAcceptedPageSignature = browserContext?.pageSignature
-            lastAcceptedViewportSignature = browserContext?.viewportSignature
-            lastAcceptedMediaSession = browserContext?.activity == .media ? browserContext?.sessionKey : nil
-            lastAcceptedAt = capture.timestamp
-            
-            await onCapture?(capture)
-            return capture
-            
-        } catch {
-            print("Screen capture error: \(error)")
+        guard let image = await captureImage(
+            displayID: displayID,
+            maxWidth: config.maxWidth,
+            maxHeight: config.maxHeight
+        ) else {
             return nil
         }
+
+        guard let data = image.jpegData(compressionQuality: Double(config.quality) / 100.0) else {
+            lastCaptureErrorMessage = "Screen capture succeeded, but Aura could not encode the image."
+            return nil
+        }
+
+        let capture = ScreenCapture(
+            displayID: displayID,
+            imageData: data,
+            timestamp: Date(),
+            displayNum: 1,
+            browserContext: browserContext,
+            captureReason: reason
+        )
+
+        lastAcceptedFingerprint = image.differenceHash()
+        lastAcceptedPageSignature = browserContext?.pageSignature
+        lastAcceptedViewportSignature = browserContext?.viewportSignature
+        lastAcceptedMediaSession = browserContext?.activity == .media ? browserContext?.sessionKey : nil
+        lastAcceptedAt = capture.timestamp
+
+        await onCapture?(capture)
+        return capture
     }
 
     private func captureImage(displayID: CGDirectDisplayID, maxWidth: Int, maxHeight: Int) async -> CGImage? {
         do {
+            lastCaptureErrorMessage = nil
             let content = try await SCShareableContent.current
 
             guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                lastCaptureErrorMessage = "ScreenCaptureKit could not find the main display to capture."
                 return nil
             }
 
@@ -131,9 +133,29 @@ actor ScreenCaptureService {
 
             return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
         } catch {
-            print("Screen capture error: \(error)")
+            let message = Self.captureFailureMessage(for: error)
+            lastCaptureErrorMessage = message
+            print("Screen capture error: \(message)")
             return nil
         }
+    }
+
+    private static func captureFailureMessage(for error: Error) -> String {
+        let nsError = error as NSError
+
+        if nsError.domain == SCStreamErrorDomain,
+           let code = SCStreamError.Code(rawValue: nsError.code) {
+            switch code {
+            case .userDeclined:
+                return "Screen Recording is not granted for AuraBot. Enable it in System Settings, then restart AuraBot."
+            case .missingEntitlements:
+                return "ScreenCaptureKit reported missing entitlements. Build AuraBot with the proper Developer ID signature and hardened runtime entitlements."
+            default:
+                break
+            }
+        }
+
+        return "ScreenCaptureKit failed: \(error.localizedDescription)"
     }
 
     private func shouldCapture(

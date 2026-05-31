@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var computerUseCaptureMode: ComputerUseCaptureMode = .som
     @State private var computerUseMaxImageDimension: Double = 1600
     @State private var overlayPosition: OverlayPosition = .bottomRight
+    @State private var overlayShowsOverFullScreenApps = true
     @State private var showSavedToast = false
     @State private var appearAnimation = false
     @State private var isSaving = false
@@ -39,7 +40,8 @@ struct SettingsView: View {
                     captureEnabled: $captureEnabled,
                     captureInterval: $captureInterval,
                     captureQuality: $captureQuality,
-                    overlayPosition: $overlayPosition
+                    overlayPosition: $overlayPosition,
+                    overlayShowsOverFullScreenApps: $overlayShowsOverFullScreenApps
                 )
                 .opacity(appearAnimation ? 1 : 0)
                 .offset(y: appearAnimation ? 0 : 20)
@@ -127,6 +129,7 @@ struct SettingsView: View {
         computerUseCaptureMode = config.computerUse.captureMode
         computerUseMaxImageDimension = Double(config.computerUse.maxImageDimension)
         overlayPosition = config.app.overlayPosition
+        overlayShowsOverFullScreenApps = config.app.overlayShowsOverFullScreenApps
     }
 
     private func saveSettings() {
@@ -151,7 +154,11 @@ struct SettingsView: View {
             updatedConfig.computerUse.recordTrajectories = computerUseRecordTrajectories
             updatedConfig.computerUse.captureMode = computerUseCaptureMode
             updatedConfig.computerUse.maxImageDimension = Int(computerUseMaxImageDimension)
+            if service.config.app.overlayPosition != overlayPosition {
+                updatedConfig.app.overlayOrigin = nil
+            }
             updatedConfig.app.overlayPosition = overlayPosition
+            updatedConfig.app.overlayShowsOverFullScreenApps = overlayShowsOverFullScreenApps
 
             do {
                 try await service.saveConfiguration(updatedConfig)
@@ -199,11 +206,21 @@ struct CaptureSettingsSection: View {
     @Binding var captureInterval: Double
     @Binding var captureQuality: Double
     @Binding var overlayPosition: OverlayPosition
+    @Binding var overlayShowsOverFullScreenApps: Bool
     
     var body: some View {
         SettingsSection(title: "Capture", icon: "camera.fill") {
             VStack(spacing: Spacing.xl) {
                 OverlayPositionPicker(position: $overlayPosition)
+
+                Divider()
+                    .background(Colors.glassBorder)
+
+                CustomToggle(
+                    title: "Show Over Full-Screen Apps",
+                    description: "Keep Aura visible above apps in full-screen spaces.",
+                    isOn: $overlayShowsOverFullScreenApps
+                )
 
                 Divider()
                     .background(Colors.glassBorder)
@@ -322,7 +339,7 @@ struct OverlayPositionPicker: View {
                         .fontWeight(.medium)
                         .foregroundColor(Colors.textPrimary)
 
-                    Text("Choose where Aura stays available above other apps.")
+                    Text("Choose a snap point. Drag Aura on screen for a custom spot.")
                         .font(Typography.caption)
                         .foregroundColor(Colors.textMuted)
                 }
@@ -503,10 +520,6 @@ struct PermissionsSection: View {
                     }
 
                     Spacer()
-
-                    SecondaryButton("Refresh", icon: "arrow.clockwise") {
-                        service.refreshPermissionStatuses()
-                    }
                 }
 
                 PermissionChecklistGroup(statuses: service.permissionStatuses) { kind in
@@ -644,10 +657,6 @@ struct ComputerUseSettingsSection: View {
                     .background(Colors.glassBorder)
 
                 HStack(spacing: Spacing.md) {
-                    SecondaryButton("Refresh", icon: "arrow.clockwise") {
-                        Task { await service.refreshComputerUseStatus() }
-                    }
-
                     SecondaryButton("Permissions", icon: "lock.shield") {
                         Task { await service.requestComputerUsePermissions() }
                     }

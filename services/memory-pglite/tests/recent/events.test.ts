@@ -119,6 +119,60 @@ describe("recent context events", () => {
     });
   });
 
+  it("persists dynamic terminal and system context sources", async () => {
+    await withTempDir(async (dir) => {
+      const database = await openMemoryDatabase({ dataDir: dir, embeddingDimensions: 3 });
+      try {
+        await insertRecentContextEvent(database, {
+          ...baseInput,
+          idempotency_key: "terminal_event",
+          source: "terminal",
+          content: "Running local memory verification commands in Terminal.",
+          occurred_at: "2026-04-21T09:10:00Z",
+          metadata: {
+            ...baseInput.metadata,
+            context: "terminal_debugging",
+            activities: ["terminal", "verification"],
+            key_elements: ["npm test", "memory-pglite"],
+            app_name: "Terminal",
+            window_title: "aurabot - npm test",
+          },
+        });
+
+        await insertRecentContextEvent(database, {
+          ...baseInput,
+          idempotency_key: "system_event",
+          source: "system",
+          content: "AuraBot capture loop started and health checks are green.",
+          occurred_at: "2026-04-21T09:11:00Z",
+          metadata: {
+            ...baseInput.metadata,
+            context: "system_status",
+            activities: ["capture_loop", "health_check"],
+            key_elements: ["memory backend", "local capture"],
+          },
+        });
+
+        const terminalItems = await getRecentContextEvents(database, {
+          userId: "default_user",
+          source: "terminal",
+          app: "Terminal",
+        });
+        const systemItems = await getRecentContextEvents(database, {
+          userId: "default_user",
+          source: "system",
+        });
+
+        assert.equal(terminalItems.length, 1);
+        assert.equal(terminalItems[0]?.metadata.window_title, "aurabot - npm test");
+        assert.equal(systemItems.length, 1);
+        assert.equal(systemItems[0]?.content, "AuraBot capture loop started and health checks are green.");
+      } finally {
+        await database.close();
+      }
+    });
+  });
+
   it("cleans up events older than the configured horizon", async () => {
     await withTempDir(async (dir) => {
       const database = await openMemoryDatabase({ dataDir: dir, embeddingDimensions: 3 });

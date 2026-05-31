@@ -215,6 +215,8 @@ struct AppSettings: Codable {
     var processOnCapture: Bool = true
     var memoryWindow: Int = 10
     var overlayPosition: OverlayPosition = .bottomRight
+    var overlayOrigin: OverlayOrigin?
+    var overlayShowsOverFullScreenApps: Bool = true
     var onboardingCompleted: Bool = false
     var activePluginID: String?
 
@@ -223,6 +225,8 @@ struct AppSettings: Codable {
         case processOnCapture
         case memoryWindow
         case overlayPosition
+        case overlayOrigin
+        case overlayShowsOverFullScreenApps
         case onboardingCompleted
         case activePluginID
     }
@@ -235,9 +239,16 @@ struct AppSettings: Codable {
         processOnCapture = try container.decodeIfPresent(Bool.self, forKey: .processOnCapture) ?? true
         memoryWindow = try container.decodeIfPresent(Int.self, forKey: .memoryWindow) ?? 10
         overlayPosition = try container.decodeIfPresent(OverlayPosition.self, forKey: .overlayPosition) ?? .bottomRight
+        overlayOrigin = try container.decodeIfPresent(OverlayOrigin.self, forKey: .overlayOrigin)
+        overlayShowsOverFullScreenApps = try container.decodeIfPresent(Bool.self, forKey: .overlayShowsOverFullScreenApps) ?? true
         onboardingCompleted = try container.decodeIfPresent(Bool.self, forKey: .onboardingCompleted) ?? false
         activePluginID = try container.decodeIfPresent(String.self, forKey: .activePluginID)
     }
+}
+
+struct OverlayOrigin: Codable, Equatable, Sendable {
+    var x: Double
+    var y: Double
 }
 
 struct ComputerUseConfig: Codable, Equatable {
