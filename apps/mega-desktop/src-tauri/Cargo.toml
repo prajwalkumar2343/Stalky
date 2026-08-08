@@ -15,7 +15,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 mega-core.workspace = true
 mega-capture.workspace = true
+mega-ipc.workspace = true
 mega-platform-macos.workspace = true
+mega-permissions.workspace = true
 stalky-accessibility.workspace = true
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["tray-icon"] }

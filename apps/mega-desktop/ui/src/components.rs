@@ -81,27 +81,6 @@ pub fn EventRow(
 }
 
 #[component]
-pub fn PermissionCard(
-    number: &'static str,
-    title: &'static str,
-    body: &'static str,
-    granted: bool,
-) -> impl IntoView {
-    view! {
-        <article class="permission-card">
-            <span class="permission-number">{number}</span>
-            <div>
-                <h3>{title}</h3>
-                <p>{body}</p>
-            </div>
-            <span class="permission-state" class:granted=granted>
-                {if granted { "Granted" } else { "Not requested" }}
-            </span>
-        </article>
-    }
-}
-
-#[component]
 pub fn InspectorField(label: &'static str, value: &'static str) -> impl IntoView {
     view! {
         <div class="inspector-field">

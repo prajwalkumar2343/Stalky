@@ -1,8 +1,10 @@
-//! Read-only macOS permission probes and normalized platform event contracts.
+//! macOS permission probes, explicit requests, recovery, and normalized event contracts.
 //!
-//! This crate is the only owner of the macOS framework boundary. It does not
-//! request permission, observe accessibility trees, capture media, or inject
-//! input. Event normalization is pure and can be used by a future event source.
+//! This crate is the only owner of the macOS permission-framework boundary.
+//! Probes remain read-only; explicit requests and System Settings recovery are
+//! exposed separately. It does not observe accessibility trees, capture media,
+//! or inject input. Event normalization is pure and can be used by a future
+//! event source.
 
 use mega_core::{PermissionCapability, PermissionState};
 use thiserror::Error;
@@ -20,29 +22,54 @@ pub use normalization::{
     normalize_microphone_permission, normalize_platform_event,
 };
 
-/// A platform capability that this adapter can probe or may explicitly reject.
+/// A platform capability that this adapter can probe, request, or may reject.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformFeature {
     AccessibilityPermission,
     ScreenRecordingPermission,
     MicrophonePermission,
-    LaunchAtLoginPermission,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformOperation {
+    Probe,
+    Request,
+    OpenSettings,
 }
 
 /// Failure returned when a platform capability is unavailable in this adapter.
 #[derive(Debug, Error, Eq, PartialEq)]
-#[error("{feature:?} is unsupported on this target")]
-pub struct PlatformError {
-    pub feature: PlatformFeature,
+pub enum PlatformError {
+    #[error("{feature:?} is unsupported on this target")]
+    Unsupported { feature: PlatformFeature },
+    #[error("{operation:?} for {feature:?} failed: {message}")]
+    Native {
+        feature: PlatformFeature,
+        operation: PlatformOperation,
+        message: String,
+    },
 }
 
 impl PlatformError {
+    #[cfg(not(target_os = "macos"))]
     const fn unsupported(feature: PlatformFeature) -> Self {
-        Self { feature }
+        Self::Unsupported { feature }
+    }
+
+    fn native(
+        feature: PlatformFeature,
+        operation: PlatformOperation,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Native {
+            feature,
+            operation,
+            message: message.into(),
+        }
     }
 }
 
-/// Read-only macOS platform adapter.
+/// macOS permission adapter with separate probe, request, and recovery APIs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MacOsPlatform;
 
@@ -83,9 +110,27 @@ impl MacOsPlatform {
             microphone: self.microphone_permission_status()?,
         })
     }
+
+    /// Performs one explicit, user-triggered native request. Probes never call
+    /// these APIs, so startup and background rechecks cannot open a prompt.
+    pub fn request_permission(
+        &self,
+        capability: PermissionCapability,
+    ) -> Result<PermissionState, PlatformError> {
+        platform::request_permission(capability)
+    }
+
+    /// Opens only the allowlisted macOS Privacy & Security pane for a privacy
+    /// capability. The caller remains responsible for rechecking afterwards.
+    pub fn open_permission_settings(
+        &self,
+        capability: PermissionCapability,
+    ) -> Result<(), PlatformError> {
+        platform::open_permission_settings(capability)
+    }
 }
 
-/// The three permission states exposed by this adapter.
+/// The three privacy permission states exposed by this adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PermissionStatuses {
     /// Accessibility trust for the current process.
@@ -116,7 +161,7 @@ mod tests {
     fn microphone_permission_normalization_preserves_three_os_states() {
         assert_eq!(
             normalize_microphone_permission(MacOsMicrophonePermission::Undetermined),
-            PermissionState::NotRequested
+            PermissionState::NotDetermined
         );
         assert_eq!(
             normalize_microphone_permission(MacOsMicrophonePermission::Denied),
@@ -223,7 +268,7 @@ mod tests {
         ] {
             assert_eq!(
                 platform.permission_status(capability),
-                Err(PlatformError {
+                Err(PlatformError::Unsupported {
                     feature: match capability {
                         PermissionCapability::Accessibility => {
                             PlatformFeature::AccessibilityPermission
@@ -232,7 +277,6 @@ mod tests {
                             PlatformFeature::ScreenRecordingPermission
                         }
                         PermissionCapability::Microphone => PlatformFeature::MicrophonePermission,
-                        PermissionCapability::LaunchAtLogin => unreachable!(),
                     },
                 })
             );

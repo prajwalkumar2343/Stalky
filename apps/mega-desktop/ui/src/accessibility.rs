@@ -4,8 +4,8 @@ use leptos::task::spawn_local;
 
 use crate::tauri::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityNode, AccessibilityStatus,
-    PermissionState, accessibility_action, accessibility_request, accessibility_start,
-    accessibility_status, accessibility_stop, is_available,
+    PermissionState, PermissionStateLabel, accessibility_action, accessibility_start,
+    accessibility_status, accessibility_stop, is_available, permission_request,
 };
 
 #[component]
@@ -71,8 +71,16 @@ pub fn Accessibility() -> impl IntoView {
         set_busy.set(true);
         set_message.set(None);
         spawn_local(async move {
-            match accessibility_request().await {
-                Ok(permission) => {
+            match permission_request(crate::tauri::PermissionCapability::Accessibility).await {
+                Ok(snapshot) => {
+                    let permission = snapshot
+                        .statuses
+                        .iter()
+                        .find(|status| {
+                            status.capability == crate::tauri::PermissionCapability::Accessibility
+                        })
+                        .map(|status| status.authorization)
+                        .unwrap_or(PermissionState::Unknown);
                     set_status.update(|current| current.permission = permission);
                     let copy = if permission == PermissionState::Granted {
                         "Accessibility access is ready."
