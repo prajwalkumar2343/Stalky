@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">Stalky</title>
+  <desc id="description">Two offset concentric rings forming an abstract M-shaped aperture.</desc>
+  <rect width="512" height="512" rx="116" fill="#181817"/>
+  <circle cx="224" cy="224" r="122" fill="none" stroke="#F5F5F2" stroke-width="34"/>
+  <circle cx="300" cy="292" r="112" fill="none" stroke="#A7A7A0" stroke-width="28"/>
+  <path d="M148 314c36 62 98 98 168 98 22 0 44-4 64-11" fill="none" stroke="#F5F5F2" stroke-width="34" stroke-linecap="round"/>
+</svg>
