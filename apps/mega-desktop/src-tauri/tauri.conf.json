@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Stalky",
+  "version": "0.1.0",
+  "identifier": "com.stalky.desktop",
+  "build": {
+    "beforeDevCommand": "cd ../ui && trunk serve",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "cd ../ui && trunk build --release",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Stalky",
+        "width": 1240,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "Utility",
+    "copyright": "Copyright © 2026 Stalky",
+    "shortDescription": "Private ambient context infrastructure",
+    "longDescription": "Local-first screen, accessibility, and microphone infrastructure for macOS.",
+    "macOS": {
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist",
+      "minimumSystemVersion": "15.0"
+    }
+  }
+}

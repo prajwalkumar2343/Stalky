@@ -1,0 +1,13 @@
+[package]
+name = "mega-test-support"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mega-core.workspace = true
+mega-ipc.workspace = true
+mega-permissions.workspace = true
+mega-runtime.workspace = true
+serde.workspace = true
+tokio.workspace = true

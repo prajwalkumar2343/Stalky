@@ -22,69 +22,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  repository-contracts:
-    name: Repository Contracts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run repository contract tests
-        run: python -m unittest discover tests
-
-  python-contracts:
-    name: Python Contracts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Compile Python sources
-        run: python -m compileall -q tools
-
-  memory-pglite:
-    name: Memory PGlite
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/memory-pglite
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: services/memory-pglite/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Run plugin contract tests
-        run: npm run build && node --test dist/tests/plugins/*.test.js
-
-      - name: Run Memory v2 test suite
-        run: npm test
-
-  macos-app:
-    name: macOS App
+  rust:
+    name: Rust Quality Gates
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build AuraBot
-        run: swift build
-        working-directory: apps/macos
+      - name: Install Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
 
-      - name: Run AuraBot tests
-        run: swift test
-        working-directory: apps/macos
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
