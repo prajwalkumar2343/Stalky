@@ -2,7 +2,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::accessibility::Accessibility;
-use crate::components::{EventRow, InspectorField, MetricCard, PermissionCard, StatusRow, Tone};
+use crate::components::{EventRow, InspectorField, MetricCard, StatusRow, Tone};
+use crate::permissions::{PermissionOnboarding, PermissionSettings};
 use crate::tauri::{
     CaptureState, CaptureStatus, capture_start, capture_status as load_capture_status,
     capture_stop, is_available as capture_is_available,
@@ -88,7 +89,8 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <main class="app-shell" class:inspector-closed=move || !inspector_open.get() || section.get() == Section::Accessibility>
+        <PermissionOnboarding />
+        <main id="stalky-app-shell" tabindex="-1" class="app-shell" class:inspector-closed=move || !inspector_open.get() || section.get() == Section::Accessibility>
             <header class="titlebar" data-tauri-drag-region="true">
                 <div class="traffic-space" aria-hidden="true"></div>
                 <div class="workspace-identity">
@@ -301,7 +303,7 @@ fn Diagnostics() -> impl IntoView {
 
 #[component]
 fn Settings() -> impl IntoView {
-    view! { <div class="page"><PageHeader eyebrow="Settings" title="Your Mac, your boundaries." body="Every ambient capability remains visible, reversible, and independently configurable."/><div class="permission-list"><PermissionCard number="01" title="Screen recording" body="Capture the display or window you explicitly select." granted=false/><PermissionCard number="02" title="Accessibility" body="Observe interface structure and run controls you explicitly choose." granted=false/><PermissionCard number="03" title="Microphone" body="Enable local input testing and voice activity detection." granted=false/><PermissionCard number="04" title="Launch at login" body="Start Stalky after you sign in to this Mac." granted=false/></div></div> }
+    view! { <div class="page"><PageHeader eyebrow="Settings" title="Your Mac, your boundaries." body="Every ambient capability remains visible, reversible, and independently configurable."/><PermissionSettings /></div> }
 }
 
 #[component]
