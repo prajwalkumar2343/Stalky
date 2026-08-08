@@ -1,0 +1,4 @@
+/target/
+/apps/mega-desktop/ui/dist/
+/apps/mega-desktop/ui/target/
+/apps/mega-desktop/src-tauri/gen/
