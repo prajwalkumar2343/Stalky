@@ -2209,6 +2209,8 @@ version = "0.1.0"
 dependencies = [
  "mega-capture",
  "mega-core",
+ "mega-ipc",
+ "mega-permissions",
  "mega-platform-macos",
  "serde",
  "stalky-accessibility",
@@ -2239,10 +2241,16 @@ dependencies = [
 name = "mega-platform-macos"
 version = "0.1.0"
 dependencies = [
+ "block2",
+ "dispatch2",
  "mega-core",
+ "objc2",
+ "objc2-app-kit",
  "objc2-application-services",
  "objc2-avf-audio",
+ "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-foundation",
  "thiserror 2.0.20",
 ]
 
@@ -2275,6 +2283,7 @@ dependencies = [
  "gloo-timers",
  "js-sys",
  "leptos",
+ "mega-ipc",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
@@ -2461,6 +2470,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
