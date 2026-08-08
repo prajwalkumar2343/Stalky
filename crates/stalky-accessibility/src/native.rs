@@ -17,14 +17,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use libc::pid_t;
-use mega_permissions::PermissionState;
 use objc2_application_services::{
-    AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXObserver, AXUIElement, AXValue,
-    AXValueType, kAXTrustedCheckOptionPrompt,
+    AXError, AXIsProcessTrusted, AXObserver, AXUIElement, AXValue, AXValueType,
 };
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFRunLoop, CFRunLoopSource, CFString,
-    CFType, Type, kCFBooleanTrue, kCFRunLoopDefaultMode,
+    CFArray, CFBoolean, CFNumber, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, Type,
+    kCFBooleanTrue, kCFRunLoopDefaultMode,
 };
 
 use crate::model::{
@@ -143,23 +141,6 @@ impl AccessibilityBackend for NativeBackend {
                 })
             }
         }
-    }
-
-    fn request_permission(&self) -> Result<PermissionState, AccessibilityError> {
-        // This is called only by the explicit user-triggered request command.
-        let key = unsafe { kAXTrustedCheckOptionPrompt };
-        let value = unsafe { kCFBooleanTrue }.ok_or(AccessibilityError::Native {
-            operation: "accessibility_prompt_value",
-            code: -1,
-        })?;
-        let options = CFDictionary::from_slices(&[key], &[value]);
-        let options: &CFDictionary = unsafe { options.cast_unchecked() };
-        let trusted = unsafe { AXIsProcessTrustedWithOptions(Some(options)) };
-        Ok(if trusted {
-            PermissionState::Granted
-        } else {
-            PermissionState::Denied
-        })
     }
 }
 

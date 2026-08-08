@@ -58,7 +58,6 @@ pub trait AccessibilityBackend: Send + Sync {
         &self,
         events: Arc<dyn AccessibilityEventSink>,
     ) -> Result<Box<dyn AccessibilitySession>, AccessibilityError>;
-    fn request_permission(&self) -> Result<PermissionState, AccessibilityError>;
 }
 
 #[allow(dead_code)]
@@ -217,20 +216,6 @@ impl AccessibilityService {
             .lock()
             .map_err(|_| AccessibilityError::WorkerStopped)?;
         Ok(status_from_inner(&inner))
-    }
-
-    pub fn request_permission(&self) -> Result<PermissionState, AccessibilityError> {
-        let _lifecycle = self
-            .lifecycle
-            .lock()
-            .map_err(|_| AccessibilityError::WorkerStopped)?;
-        let permission = self.backend.request_permission()?;
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| AccessibilityError::WorkerStopped)?;
-        inner.permission = permission;
-        Ok(permission)
     }
 
     pub fn execute(
@@ -438,13 +423,6 @@ mod tests {
             } else {
                 Err(AccessibilityError::NotTrusted)
             }
-        }
-        fn request_permission(&self) -> Result<PermissionState, AccessibilityError> {
-            Ok(if self.trusted {
-                PermissionState::Granted
-            } else {
-                PermissionState::Denied
-            })
         }
     }
 
