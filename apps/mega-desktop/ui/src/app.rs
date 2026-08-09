@@ -44,6 +44,7 @@ pub fn App() -> impl IntoView {
     let (capture_busy, set_capture_busy) = signal(false);
     let (capture_message, set_capture_message) = signal(None::<String>);
     let (onboarding, set_onboarding) = signal(None::<OnboardingState>);
+    let (onboarding_message, set_onboarding_message) = signal(None::<String>);
     let (permissions, set_permissions) = signal(PermissionStatuses::default());
 
     let refresh_permissions = Callback::new(move |_: ()| {
@@ -87,9 +88,12 @@ pub fn App() -> impl IntoView {
     let finish_onboarding =
         Callback::new(move |state: OnboardingState| set_onboarding.set(Some(state)));
     let replay_onboarding = Callback::new(move |_: ()| {
+        set_onboarding_message.set(None);
         spawn_local(async move {
-            if let Ok(state) = onboarding_reset().await {
-                set_onboarding.set(Some(state));
+            match onboarding_reset().await {
+                Ok(state) => set_onboarding.set(Some(state)),
+                Err(error) => set_onboarding_message
+                    .set(Some(format!("Could not replay onboarding: {error}"))),
             }
         });
     });
@@ -274,6 +278,12 @@ pub fn App() -> impl IntoView {
         } else {
             ().into_any()
         }}
+        {move || onboarding_message.get().map(|message| view! {
+            <div class="app-message" role="alert" aria-live="assertive">
+                <strong>"Onboarding could not be reset"</strong>
+                <span>{message}</span>
+            </div>
+        })}
     }
 }
 

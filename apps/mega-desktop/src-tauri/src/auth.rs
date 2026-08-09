@@ -62,11 +62,15 @@ fn encode(value: &str) -> String {
         .collect()
 }
 
+fn session_is_valid(access_token: &str, expires_at: Option<u64>, now: u64) -> bool {
+    !access_token.trim().is_empty() && expires_at.is_some_and(|expires_at| expires_at > now)
+}
+
 #[cfg(target_os = "macos")]
 mod native {
     use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use getrandom::fill;
@@ -78,7 +82,7 @@ mod native {
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
 
-    use super::{GoogleIdentity, authorization_url, client_id};
+    use super::{GoogleIdentity, authorization_url, client_id, session_is_valid};
 
     const KEYCHAIN_SERVICE: &str = "com.stalky.desktop.google";
     const KEYCHAIN_ACCOUNT: &str = "oauth-session";
@@ -94,6 +98,8 @@ mod native {
         access_token: String,
         refresh_token: Option<String>,
         expires_in: Option<u64>,
+        #[serde(default)]
+        expires_at: Option<u64>,
         token_type: Option<String>,
     }
 
@@ -107,7 +113,9 @@ mod native {
         get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
             .ok()
             .and_then(|encoded| serde_json::from_slice::<GoogleSession>(&encoded).ok())
-            .is_some_and(|session| !session.access_token.trim().is_empty())
+            .is_some_and(|session| {
+                session_is_valid(&session.access_token, session.expires_at, now_seconds())
+            })
     }
 
     pub fn sign_out() -> Result<(), String> {
@@ -412,8 +420,17 @@ mod native {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
             expires_in: token.expires_in,
+            expires_at: token
+                .expires_in
+                .map(|expires_in| now_seconds().saturating_add(expires_in)),
             token_type: token.token_type,
         })
+    }
+
+    fn now_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs())
     }
 
     fn oauth_client() -> Result<Client, String> {
@@ -533,7 +550,7 @@ pub fn run() -> Result<GoogleIdentity, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GOOGLE_SCOPES, authorization_url};
+    use super::{GOOGLE_SCOPES, authorization_url, session_is_valid};
 
     #[test]
     fn authorization_url_uses_pkce_and_minimal_scopes() {
@@ -550,5 +567,14 @@ mod tests {
         assert!(url.contains("nonce=nonce-value"));
         assert_eq!(GOOGLE_SCOPES, "openid email profile");
         assert!(!url.contains("client_secret"));
+    }
+
+    #[test]
+    fn expired_google_sessions_are_not_treated_as_signed_in() {
+        assert!(!session_is_valid("access-token", Some(1_000), 1_000));
+        assert!(!session_is_valid("access-token", Some(999), 1_000));
+        assert!(session_is_valid("access-token", Some(1_001), 1_000));
+        assert!(!session_is_valid("", Some(1_001), 1_000));
+        assert!(!session_is_valid("access-token", None, 1_000));
     }
 }

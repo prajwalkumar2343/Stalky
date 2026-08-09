@@ -2,6 +2,7 @@ mod auth;
 mod permissions;
 mod preferences;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -68,6 +69,8 @@ impl From<PermissionSettingsTarget> for PermissionCapability {
 fn refresh_permission_snapshot(
     coordinator: &PermissionCoordinator,
     preferences: &PreferenceStore,
+    capture: &CaptureService,
+    accessibility: &AccessibilityService,
 ) -> PermissionStatuses {
     let platform = MacOsPlatform::new();
     for capability in [
@@ -88,6 +91,7 @@ fn refresh_permission_snapshot(
         PermissionState::Unsupported,
     );
     let snapshot = coordinator.snapshot();
+    stop_services_without_permission(&snapshot, capture, accessibility);
     PermissionStatuses {
         accessibility: display_state(
             snapshot.get(&PermissionCapability::Accessibility).copied(),
@@ -108,6 +112,28 @@ fn refresh_permission_snapshot(
     }
 }
 
+/// A protected service must not outlive the OS grant it depends on. Refreshes
+/// run on focus and on the UI poller, including when the capability page is not
+/// mounted, so revocation always tears down the corresponding session.
+fn stop_services_without_permission(
+    snapshot: &BTreeMap<PermissionCapability, PermissionState>,
+    capture: &CaptureService,
+    accessibility: &AccessibilityService,
+) {
+    if snapshot
+        .get(&PermissionCapability::ScreenRecording)
+        .is_some_and(|state| !state.is_granted())
+    {
+        let _ = capture.stop();
+    }
+    if snapshot
+        .get(&PermissionCapability::Accessibility)
+        .is_some_and(|state| !state.is_granted())
+    {
+        let _ = accessibility.stop();
+    }
+}
+
 fn display_state(state: Option<PermissionState>, has_requested: bool) -> PermissionState {
     match state.unwrap_or(PermissionState::Unknown) {
         PermissionState::Denied if !has_requested => PermissionState::NotRequested,
@@ -119,8 +145,15 @@ fn display_state(state: Option<PermissionState>, has_requested: bool) -> Permiss
 fn permission_statuses(
     coordinator: State<'_, PermissionCoordinator>,
     preferences: State<'_, PreferenceStore>,
+    capture: State<'_, CaptureService>,
+    accessibility: State<'_, AccessibilityService>,
 ) -> PermissionStatuses {
-    refresh_permission_snapshot(coordinator.inner(), preferences.inner())
+    refresh_permission_snapshot(
+        coordinator.inner(),
+        preferences.inner(),
+        capture.inner(),
+        accessibility.inner(),
+    )
 }
 
 #[tauri::command]
@@ -156,6 +189,7 @@ fn permission_open_settings(capability: PermissionSettingsTarget) -> Result<(), 
 async fn permission_request(
     coordinator: State<'_, PermissionCoordinator>,
     preferences: State<'_, PreferenceStore>,
+    capture: State<'_, CaptureService>,
     accessibility: State<'_, AccessibilityService>,
     capability: PermissionSettingsTarget,
 ) -> Result<PermissionStatuses, String> {
@@ -171,8 +205,9 @@ async fn permission_request(
 
     let coordinator = coordinator.inner().clone();
     let accessibility = accessibility.inner().clone();
+    let accessibility_for_request = accessibility.clone();
     let result = match tauri::async_runtime::spawn_blocking(move || match capability {
-        PermissionCapability::Accessibility => accessibility
+        PermissionCapability::Accessibility => accessibility_for_request
             .request_permission()
             .map_err(|error| error.to_string()),
         PermissionCapability::ScreenRecording | PermissionCapability::Microphone => {
@@ -202,6 +237,8 @@ async fn permission_request(
     Ok(refresh_permission_snapshot(
         &coordinator,
         preferences.inner(),
+        capture.inner(),
+        &accessibility,
     ))
 }
 
@@ -396,7 +433,14 @@ pub fn run() {
             if matches!(event, WindowEvent::Focused(true)) {
                 let coordinator = window.state::<PermissionCoordinator>();
                 let preferences = window.state::<PreferenceStore>();
-                let _ = refresh_permission_snapshot(coordinator.inner(), preferences.inner());
+                let capture = window.state::<CaptureService>();
+                let accessibility = window.state::<AccessibilityService>();
+                let _ = refresh_permission_snapshot(
+                    coordinator.inner(),
+                    preferences.inner(),
+                    capture.inner(),
+                    accessibility.inner(),
+                );
             }
         })
         .invoke_handler(tauri::generate_handler![
