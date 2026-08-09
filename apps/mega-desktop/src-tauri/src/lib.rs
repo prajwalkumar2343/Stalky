@@ -1,37 +1,21 @@
+mod auth;
 mod permissions;
+mod preferences;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::Command;
 
 use mega_capture::{CaptureError, CaptureService, CaptureSource, CaptureStatus};
-use mega_ipc::{
-    PERMISSIONS_CHANGED_EVENT, PermissionCapability, PermissionError, PermissionSnapshot,
-    PermissionState,
-};
-use permissions::PermissionCoordinator;
-use serde::Serialize;
+use mega_core::{PermissionCapability, PermissionState};
+use mega_platform_macos::{MacOsPlatform, PlatformErrorKind};
+use permissions::{PermissionCoordinator, PermissionRequestError};
+use preferences::{AccountMode, OnboardingState, PreferenceStore};
+use serde::{Deserialize, Serialize};
 use stalky_accessibility::{
     AccessibilityActionRequest, AccessibilityError, AccessibilityService, AccessibilityStatus,
 };
-use tauri::{Emitter, Manager};
-
-#[derive(Clone, Debug, Default)]
-struct PermissionFocusGate {
-    scheduled: Arc<AtomicBool>,
-}
-
-impl PermissionFocusGate {
-    fn try_schedule(&self) -> bool {
-        self.scheduled
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    fn finish(&self) {
-        self.scheduled.store(false, Ordering::Release);
-    }
-}
+use tauri::{Manager, State, WindowEvent};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,133 +34,292 @@ fn shell_identity() -> ShellIdentity {
     }
 }
 
-#[tauri::command]
-fn permission_snapshot(
-    coordinator: tauri::State<'_, PermissionCoordinator>,
-) -> Result<PermissionSnapshot, PermissionError> {
-    coordinator.inner().snapshot()
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PermissionStatuses {
+    accessibility: PermissionState,
+    screen_recording: PermissionState,
+    microphone: PermissionState,
+    launch_at_login: PermissionState,
+    launch_at_login_supported: bool,
 }
 
-#[tauri::command]
-async fn permission_recheck(
-    app: tauri::AppHandle,
-    coordinator: tauri::State<'_, PermissionCoordinator>,
-    capture: tauri::State<'_, CaptureService>,
-    accessibility: tauri::State<'_, AccessibilityService>,
-) -> Result<PermissionSnapshot, PermissionError> {
-    let coordinator = coordinator.inner().clone();
-    let capture = capture.inner().clone();
-    let accessibility = accessibility.inner().clone();
-    let event_app = app.clone();
-    let snapshot = tauri::async_runtime::spawn_blocking(move || {
-        coordinator.recheck_with_notify(|snapshot| {
-            publish_permission_snapshot(&event_app, &snapshot);
-        })
-    })
-    .await
-    .map_err(|error| PermissionError::ProbeFailed {
-        capability: PermissionCapability::ScreenRecording,
-        message: format!("permission recheck task failed: {error}"),
-    })??;
-    gate_runtime(&snapshot, &capture, &accessibility);
-    publish_permission_snapshot(&app, &snapshot);
-    Ok(snapshot)
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PermissionSettingsTarget {
+    Accessibility,
+    ScreenRecording,
+    Microphone,
+    LaunchAtLogin,
 }
 
-#[tauri::command]
-async fn permission_request(
-    app: tauri::AppHandle,
-    coordinator: tauri::State<'_, PermissionCoordinator>,
-    capture: tauri::State<'_, CaptureService>,
-    accessibility: tauri::State<'_, AccessibilityService>,
-    capability: PermissionCapability,
-) -> Result<PermissionSnapshot, PermissionError> {
-    let coordinator = coordinator.inner().clone();
-    let capture = capture.inner().clone();
-    let accessibility = accessibility.inner().clone();
-    let event_app = app.clone();
-    let snapshot = tauri::async_runtime::spawn_blocking(move || {
-        coordinator.request(capability, |snapshot| {
-            publish_permission_snapshot(&event_app, &snapshot);
-        })
-    })
-    .await
-    .map_err(|error| PermissionError::RequestFailed {
-        capability,
-        message: format!("permission request task failed: {error}"),
-    })??;
-    gate_runtime(&snapshot, &capture, &accessibility);
-    publish_permission_snapshot(&app, &snapshot);
-    Ok(snapshot)
+impl From<PermissionSettingsTarget> for PermissionCapability {
+    fn from(value: PermissionSettingsTarget) -> Self {
+        match value {
+            PermissionSettingsTarget::Accessibility => Self::Accessibility,
+            PermissionSettingsTarget::ScreenRecording => Self::ScreenRecording,
+            PermissionSettingsTarget::Microphone => Self::Microphone,
+            PermissionSettingsTarget::LaunchAtLogin => Self::LaunchAtLogin,
+        }
+    }
 }
 
-#[tauri::command]
-async fn permission_open_settings(
-    app: tauri::AppHandle,
-    coordinator: tauri::State<'_, PermissionCoordinator>,
-    capability: PermissionCapability,
-) -> Result<PermissionSnapshot, PermissionError> {
-    let coordinator = coordinator.inner().clone();
-    let snapshot =
-        tauri::async_runtime::spawn_blocking(move || coordinator.open_settings(capability))
-            .await
-            .map_err(|error| PermissionError::SettingsFailed {
-                capability,
-                message: format!("System Settings task failed: {error}"),
-            })??;
-    publish_permission_snapshot(&app, &snapshot);
-    Ok(snapshot)
+/// Reads fresh OS truth and updates the in-memory coordinator. No native
+/// request method is called here, including when the window regains focus.
+fn refresh_permission_snapshot(
+    coordinator: &PermissionCoordinator,
+    preferences: &PreferenceStore,
+    capture: &CaptureService,
+    accessibility: &AccessibilityService,
+) -> PermissionStatuses {
+    let platform = MacOsPlatform::new();
+    for capability in [
+        PermissionCapability::Accessibility,
+        PermissionCapability::ScreenRecording,
+        PermissionCapability::Microphone,
+    ] {
+        let state = platform
+            .permission_status(capability)
+            .unwrap_or_else(|error| match error.kind {
+                PlatformErrorKind::Unsupported => PermissionState::Unsupported,
+                PlatformErrorKind::RequestTimeout => PermissionState::Unknown,
+            });
+        coordinator.observe(capability, state);
+    }
+    coordinator.observe(
+        PermissionCapability::LaunchAtLogin,
+        PermissionState::Unsupported,
+    );
+    let snapshot = coordinator.snapshot();
+    stop_services_without_permission(&snapshot, capture, accessibility);
+    PermissionStatuses {
+        accessibility: display_state(
+            snapshot.get(&PermissionCapability::Accessibility).copied(),
+            preferences.has_requested(PermissionCapability::Accessibility),
+        ),
+        screen_recording: display_state(
+            snapshot
+                .get(&PermissionCapability::ScreenRecording)
+                .copied(),
+            preferences.has_requested(PermissionCapability::ScreenRecording),
+        ),
+        microphone: display_state(
+            snapshot.get(&PermissionCapability::Microphone).copied(),
+            preferences.has_requested(PermissionCapability::Microphone),
+        ),
+        launch_at_login: PermissionState::Unsupported,
+        launch_at_login_supported: false,
+    }
 }
 
-fn publish_permission_snapshot(app: &tauri::AppHandle, snapshot: &PermissionSnapshot) {
-    let _ = app.emit(PERMISSIONS_CHANGED_EVENT, snapshot);
-}
-
-fn gate_runtime(
-    snapshot: &PermissionSnapshot,
+/// A protected service must not outlive the OS grant it depends on. Refreshes
+/// run on focus and on the UI poller, including when the capability page is not
+/// mounted, so revocation always tears down the corresponding session.
+fn stop_services_without_permission(
+    snapshot: &BTreeMap<PermissionCapability, PermissionState>,
     capture: &CaptureService,
     accessibility: &AccessibilityService,
 ) {
-    let is_lost = |capability| {
-        snapshot
-            .statuses
-            .iter()
-            .find(|status| status.capability == capability)
-            .is_some_and(|status| status.authorization != PermissionState::Granted)
-    };
-
-    if is_lost(PermissionCapability::ScreenRecording) {
+    if snapshot
+        .get(&PermissionCapability::ScreenRecording)
+        .is_some_and(|state| !state.is_granted())
+    {
         let _ = capture.stop();
     }
-    if is_lost(PermissionCapability::Accessibility) {
+    if snapshot
+        .get(&PermissionCapability::Accessibility)
+        .is_some_and(|state| !state.is_granted())
+    {
         let _ = accessibility.stop();
     }
 }
 
+fn display_state(state: Option<PermissionState>, has_requested: bool) -> PermissionState {
+    match state.unwrap_or(PermissionState::Unknown) {
+        PermissionState::Denied if !has_requested => PermissionState::NotRequested,
+        state => state,
+    }
+}
+
+#[tauri::command]
+fn permission_statuses(
+    coordinator: State<'_, PermissionCoordinator>,
+    preferences: State<'_, PreferenceStore>,
+    capture: State<'_, CaptureService>,
+    accessibility: State<'_, AccessibilityService>,
+) -> PermissionStatuses {
+    refresh_permission_snapshot(
+        coordinator.inner(),
+        preferences.inner(),
+        capture.inner(),
+        accessibility.inner(),
+    )
+}
+
+#[tauri::command]
+fn permission_open_settings(capability: PermissionSettingsTarget) -> Result<(), String> {
+    let target = match capability {
+        PermissionSettingsTarget::Accessibility => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+        PermissionSettingsTarget::ScreenRecording => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        PermissionSettingsTarget::Microphone => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
+        PermissionSettingsTarget::LaunchAtLogin => {
+            return Err("Launch at login is not supported in this build.".to_owned());
+        }
+    };
+    let status = Command::new("open")
+        .arg(target)
+        .status()
+        .map_err(|error| format!("could not open System Settings: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not open System Settings (exit status: {status})"
+        ))
+    }
+}
+
+#[tauri::command]
+async fn permission_request(
+    coordinator: State<'_, PermissionCoordinator>,
+    preferences: State<'_, PreferenceStore>,
+    capture: State<'_, CaptureService>,
+    accessibility: State<'_, AccessibilityService>,
+    capability: PermissionSettingsTarget,
+) -> Result<PermissionStatuses, String> {
+    let capability = capability.into();
+    let has_requested = preferences.has_requested(capability);
+    coordinator
+        .begin_request(capability, has_requested)
+        .map_err(permission_request_message)?;
+    if let Err(error) = preferences.record_permission_request(capability) {
+        coordinator.mark_request_failed(capability);
+        return Err(error);
+    }
+
+    let coordinator = coordinator.inner().clone();
+    let accessibility = accessibility.inner().clone();
+    let accessibility_for_request = accessibility.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || match capability {
+        PermissionCapability::Accessibility => accessibility_for_request
+            .request_permission()
+            .map_err(|error| error.to_string()),
+        PermissionCapability::ScreenRecording | PermissionCapability::Microphone => {
+            MacOsPlatform::new()
+                .request_permission(capability)
+                .map_err(|error| error.to_string())
+        }
+        PermissionCapability::LaunchAtLogin => {
+            Err("Launch at login is optional and not available in this build.".to_owned())
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            coordinator.mark_request_failed(capability);
+            return Err(format!("permission request task failed: {error}"));
+        }
+    };
+
+    match result {
+        Ok(state) => coordinator.finish_request(capability, state),
+        Err(_) => coordinator.mark_request_failed(capability),
+    }
+    result.map_err(|error| format_permission_error(capability, error))?;
+
+    Ok(refresh_permission_snapshot(
+        &coordinator,
+        preferences.inner(),
+        capture.inner(),
+        &accessibility,
+    ))
+}
+
+fn permission_request_message(error: PermissionRequestError) -> String {
+    match error {
+        PermissionRequestError::AlreadyGranted => "This permission is already granted.".to_owned(),
+        PermissionRequestError::AlreadyRequesting => {
+            "Stalky is waiting for the current permission request to finish.".to_owned()
+        }
+        PermissionRequestError::OpenSettings => {
+            "This permission was denied earlier. Open System Settings to change it.".to_owned()
+        }
+        PermissionRequestError::Unsupported => {
+            "This capability is unavailable in this build.".to_owned()
+        }
+        PermissionRequestError::Transition(error) => error,
+    }
+}
+
+fn format_permission_error(capability: PermissionCapability, error: String) -> String {
+    match capability {
+        PermissionCapability::Accessibility => {
+            format!("Accessibility request failed: {error}")
+        }
+        PermissionCapability::ScreenRecording => {
+            format!("Screen Recording request failed: {error}")
+        }
+        PermissionCapability::Microphone => format!("Microphone request failed: {error}"),
+        PermissionCapability::LaunchAtLogin => error,
+    }
+}
+
+#[tauri::command]
+async fn accessibility_status(
+    service: State<'_, AccessibilityService>,
+) -> Result<AccessibilityStatus, AccessibilityError> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.refresh_permission())
+        .await
+        .map_err(|_| AccessibilityError::WorkerStopped)?
+}
+
+#[tauri::command]
+async fn accessibility_start(
+    service: State<'_, AccessibilityService>,
+) -> Result<AccessibilityStatus, AccessibilityError> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.start())
+        .await
+        .map_err(|_| AccessibilityError::WorkerStart)?
+}
+
+#[tauri::command]
+async fn accessibility_stop(
+    service: State<'_, AccessibilityService>,
+) -> Result<AccessibilityStatus, AccessibilityError> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.stop())
+        .await
+        .map_err(|_| AccessibilityError::WorkerStopped)?
+}
+
+#[tauri::command]
+async fn accessibility_action(
+    service: State<'_, AccessibilityService>,
+    request: AccessibilityActionRequest,
+) -> Result<stalky_accessibility::AccessibilityActionResult, AccessibilityError> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.execute(request))
+        .await
+        .map_err(|_| AccessibilityError::WorkerStopped)?
+}
+
 #[tauri::command]
 async fn capture_start(
-    coordinator: tauri::State<'_, PermissionCoordinator>,
-    service: tauri::State<'_, CaptureService>,
+    service: State<'_, CaptureService>,
     source: Option<CaptureSource>,
 ) -> Result<CaptureStatus, CaptureError> {
+    let service = service.inner().clone();
     let source = source.unwrap_or(CaptureSource::PrimaryDisplay);
     let source_label = source.to_string();
-    let observed = coordinator
-        .inner()
-        .snapshot()
-        .ok()
-        .and_then(|snapshot| {
-            snapshot
-                .statuses
-                .into_iter()
-                .find(|status| status.capability == PermissionCapability::ScreenRecording)
-                .map(|status| status.authorization)
-        })
-        .unwrap_or(PermissionState::Unknown);
-    if observed != PermissionState::Granted {
-        return Err(CaptureError::PermissionNotGranted { observed });
-    }
-    let service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || service.start(source))
         .await
         .map_err(|error| CaptureError::StreamStart {
@@ -186,9 +329,7 @@ async fn capture_start(
 }
 
 #[tauri::command]
-async fn capture_stop(
-    service: tauri::State<'_, CaptureService>,
-) -> Result<CaptureStatus, CaptureError> {
+async fn capture_stop(service: State<'_, CaptureService>) -> Result<CaptureStatus, CaptureError> {
     let service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || service.stop())
         .await
@@ -199,104 +340,112 @@ async fn capture_stop(
 }
 
 #[tauri::command]
-fn capture_status(
-    service: tauri::State<'_, CaptureService>,
-) -> Result<CaptureStatus, CaptureError> {
+fn capture_status(service: State<'_, CaptureService>) -> Result<CaptureStatus, CaptureError> {
     service.status()
 }
 
 #[tauri::command]
-async fn accessibility_start(
-    coordinator: tauri::State<'_, PermissionCoordinator>,
-    service: tauri::State<'_, AccessibilityService>,
-) -> Result<AccessibilityStatus, AccessibilityError> {
-    let granted = coordinator.inner().snapshot().ok().is_some_and(|snapshot| {
-        snapshot
-            .statuses
-            .into_iter()
-            .find(|status| status.capability == PermissionCapability::Accessibility)
-            .is_some_and(|status| status.authorization == PermissionState::Granted)
-    });
-    if !granted {
-        return Err(AccessibilityError::NotTrusted);
+fn onboarding_state(preferences: State<'_, PreferenceStore>) -> OnboardingState {
+    preferences.onboarding_state()
+}
+
+#[tauri::command]
+fn onboarding_complete(
+    preferences: State<'_, PreferenceStore>,
+    account_mode: AccountMode,
+) -> Result<OnboardingState, String> {
+    validate_account_mode(account_mode)?;
+    preferences.complete_onboarding(account_mode)?;
+    Ok(preferences.onboarding_state())
+}
+
+#[tauri::command]
+fn onboarding_set_account_mode(
+    preferences: State<'_, PreferenceStore>,
+    account_mode: AccountMode,
+) -> Result<OnboardingState, String> {
+    validate_account_mode(account_mode)?;
+    preferences.set_account_mode(account_mode)?;
+    Ok(preferences.onboarding_state())
+}
+
+fn validate_account_mode(account_mode: AccountMode) -> Result<(), String> {
+    if account_mode == AccountMode::Google && !auth::signed_in() {
+        return Err("Complete Google sign-in before selecting the Google account mode.".to_owned());
     }
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.start())
-        .await
-        .map_err(|_| AccessibilityError::WorkerStart)?
+    Ok(())
 }
 
 #[tauri::command]
-async fn accessibility_stop(
-    service: tauri::State<'_, AccessibilityService>,
-) -> Result<AccessibilityStatus, AccessibilityError> {
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.stop())
-        .await
-        .map_err(|_| AccessibilityError::WorkerStopped)?
+fn onboarding_reset(preferences: State<'_, PreferenceStore>) -> Result<OnboardingState, String> {
+    auth::sign_out()?;
+    preferences.reset_onboarding()?;
+    Ok(preferences.onboarding_state())
 }
 
 #[tauri::command]
-fn accessibility_status(
-    service: tauri::State<'_, AccessibilityService>,
-) -> Result<AccessibilityStatus, AccessibilityError> {
-    service.status()
+fn google_auth_status() -> auth::GoogleAuthStatus {
+    auth::status()
 }
 
 #[tauri::command]
-async fn accessibility_action(
-    service: tauri::State<'_, AccessibilityService>,
-    request: AccessibilityActionRequest,
-) -> Result<stalky_accessibility::AccessibilityActionResult, AccessibilityError> {
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.execute(request))
+async fn google_auth_start(
+    preferences: State<'_, PreferenceStore>,
+) -> Result<auth::GoogleAuthStatus, String> {
+    if !auth::status().configured {
+        return Err("Google sign-in is not configured for this build. Set STALKY_GOOGLE_CLIENT_ID and restart Stalky.".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(auth::run)
         .await
-        .map_err(|_| AccessibilityError::WorkerStopped)?
+        .map_err(|error| format!("Google sign-in task failed: {error}"))??;
+    preferences.set_account_mode(AccountMode::Google)?;
+    Ok(auth::status())
+}
+
+#[tauri::command]
+fn google_auth_sign_out(
+    preferences: State<'_, PreferenceStore>,
+) -> Result<auth::GoogleAuthStatus, String> {
+    auth::sign_out()?;
+    preferences.set_account_mode(AccountMode::Local)?;
+    Ok(auth::status())
+}
+
+fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map(|path| path.join("preferences.json"))
+        .map_err(|error| format!("could not resolve Stalky local data directory: {error}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let path = preferences_path(app.handle()).map_err(std::io::Error::other)?;
+            app.manage(PreferenceStore::new(path));
+            app.manage(PermissionCoordinator::new());
+            Ok(())
+        })
         .manage(CaptureService::new())
         .manage(AccessibilityService::new())
-        .manage(PermissionCoordinator::new())
-        .manage(PermissionFocusGate::default())
         .on_window_event(|window, event| {
-            if !matches!(event, tauri::WindowEvent::Focused(true)) {
-                return;
+            if matches!(event, WindowEvent::Focused(true)) {
+                let coordinator = window.state::<PermissionCoordinator>();
+                let preferences = window.state::<PreferenceStore>();
+                let capture = window.state::<CaptureService>();
+                let accessibility = window.state::<AccessibilityService>();
+                let _ = refresh_permission_snapshot(
+                    coordinator.inner(),
+                    preferences.inner(),
+                    capture.inner(),
+                    accessibility.inner(),
+                );
             }
-
-            let app = window.app_handle().clone();
-            let focus_gate = app.state::<PermissionFocusGate>().inner().clone();
-            if !focus_gate.try_schedule() {
-                return;
-            }
-            let coordinator = app.state::<PermissionCoordinator>().inner().clone();
-            let capture = app.state::<CaptureService>().inner().clone();
-            let accessibility = app.state::<AccessibilityService>().inner().clone();
-            let event_app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = tauri::async_runtime::spawn_blocking(|| {
-                    std::thread::sleep(Duration::from_millis(350));
-                })
-                .await;
-                if let Ok(Ok(snapshot)) = tauri::async_runtime::spawn_blocking(move || {
-                    coordinator.recheck_with_notify(|snapshot| {
-                        publish_permission_snapshot(&event_app, &snapshot);
-                    })
-                })
-                .await
-                {
-                    gate_runtime(&snapshot, &capture, &accessibility);
-                    publish_permission_snapshot(&app, &snapshot);
-                }
-                focus_gate.finish();
-            });
         })
         .invoke_handler(tauri::generate_handler![
             shell_identity,
-            permission_snapshot,
-            permission_recheck,
+            permission_statuses,
             permission_request,
             permission_open_settings,
             capture_start,
@@ -305,7 +454,14 @@ pub fn run() {
             accessibility_start,
             accessibility_stop,
             accessibility_status,
-            accessibility_action
+            accessibility_action,
+            onboarding_state,
+            onboarding_complete,
+            onboarding_set_account_mode,
+            onboarding_reset,
+            google_auth_status,
+            google_auth_start,
+            google_auth_sign_out
         ])
         .run(tauri::generate_context!())
         .expect("Stalky desktop runtime failed");
@@ -313,12 +469,32 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_identity;
+    use mega_core::PermissionState;
+
+    use super::{AccountMode, display_state, shell_identity, validate_account_mode};
 
     #[test]
     fn shell_identity_exposes_infrastructure_milestone() {
         let identity = shell_identity();
         assert_eq!(identity.name, "Stalky");
         assert_eq!(identity.milestone, "infrastructure");
+    }
+
+    #[test]
+    fn first_observation_of_denied_permission_is_displayed_as_not_requested() {
+        assert_eq!(
+            display_state(Some(PermissionState::Denied), false),
+            PermissionState::NotRequested
+        );
+        assert_eq!(
+            display_state(Some(PermissionState::Denied), true),
+            PermissionState::Denied
+        );
+    }
+
+    #[test]
+    fn google_account_mode_cannot_be_persisted_without_a_session() {
+        assert!(validate_account_mode(AccountMode::Local).is_ok());
+        assert!(validate_account_mode(AccountMode::Google).is_err());
     }
 }

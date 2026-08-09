@@ -31,8 +31,7 @@ block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-application-services = { version = "0.3.2", default-features = false }
-objc2-app-kit = { version = "0.3.2", default-features = false }
-objc2-avf-audio = { version = "0.3.2", default-features = false }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["block2"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString", "objc2"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "objc2", "objc2-core-video"] }

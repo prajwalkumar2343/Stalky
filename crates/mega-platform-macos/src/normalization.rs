@@ -62,7 +62,7 @@ pub const fn normalize_microphone_permission(
     permission: MacOsMicrophonePermission,
 ) -> PermissionState {
     match permission {
-        MacOsMicrophonePermission::Undetermined => PermissionState::NotDetermined,
+        MacOsMicrophonePermission::Undetermined => PermissionState::NotRequested,
         MacOsMicrophonePermission::Denied => PermissionState::Denied,
         MacOsMicrophonePermission::Granted => PermissionState::Granted,
         MacOsMicrophonePermission::Unknown => PermissionState::Unknown,

@@ -10,8 +10,6 @@ Screen capture requires Screen Recording access in **System Settings → Privacy
 
 Accessibility observation is also opt-in. Stalky keeps a bounded, redacted snapshot and recent event list in memory. Controls are restricted to actions the selected element currently advertises; targets are revalidated immediately before execution, stale element IDs fail closed, and permission prompting occurs only from the dedicated user action.
 
-The three macOS privacy flows (Accessibility, Screen Recording, and Microphone) share a typed coordinator with first-run onboarding, Settings recovery, read-only focus rechecks, and runtime gating. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md) for the state model and the manual TCC QA checklist.
-
 ## Development
 
 Prerequisites:

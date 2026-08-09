@@ -16,8 +16,7 @@ pub use capture::{CaptureHealth, CaptureMode, CaptureSource, CaptureState, Captu
 pub use identifiers::{CorrelationId, SequenceNumber};
 pub use lifecycle::{LifecycleState, LifecycleTransition, LifecycleTransitionError};
 pub use mega_permissions::{
-    PermissionCapability, PermissionOperation, PermissionRegistry, PermissionSnapshot,
-    PermissionState,
+    PermissionCapability, PermissionRegistry, PermissionSnapshot, PermissionState,
 };
 pub use platform::{DisplayEvent, LifecycleEvent, PlatformEvent};
 pub use state::InfrastructureState;

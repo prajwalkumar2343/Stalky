@@ -1,12 +1,5 @@
-use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-use wasm_bindgen::JsCast;
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
-
-pub use mega_ipc::{PermissionCapability, PermissionSnapshot, PermissionState, PermissionStatus};
 
 #[wasm_bindgen]
 extern "C" {
@@ -23,13 +16,6 @@ extern "C" {
         js_name = invoke
     )]
     async fn invoke_with_args(command: &str, args: JsValue) -> Result<JsValue, JsValue>;
-
-    #[wasm_bindgen(
-        catch,
-        js_namespace = ["window", "__TAURI__", "event"],
-        js_name = listen
-    )]
-    async fn listen_for_event(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -51,6 +37,102 @@ pub enum AccessibilityState {
     Starting,
     Running,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionState {
+    #[default]
+    Unknown,
+    NotRequested,
+    Requesting,
+    Granted,
+    Denied,
+    Restricted,
+    RestartRequired,
+    Revoked,
+    Unsupported,
+}
+
+impl PermissionState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::NotRequested => "Not requested",
+            Self::Requesting => "Waiting for approval",
+            Self::Granted => "Granted",
+            Self::Denied => "Not granted",
+            Self::Restricted => "Restricted",
+            Self::RestartRequired => "Restart required",
+            Self::Revoked => "Revoked",
+            Self::Unsupported => "Optional",
+        }
+    }
+
+    pub const fn is_granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+
+    pub const fn needs_settings(self) -> bool {
+        matches!(
+            self,
+            Self::Denied | Self::Restricted | Self::Revoked | Self::RestartRequired
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCapability {
+    #[default]
+    Accessibility,
+    ScreenRecording,
+    Microphone,
+    LaunchAtLogin,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountMode {
+    #[default]
+    Local,
+    Google,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PermissionStatuses {
+    pub accessibility: PermissionState,
+    pub screen_recording: PermissionState,
+    pub microphone: PermissionState,
+    pub launch_at_login: PermissionState,
+    pub launch_at_login_supported: bool,
+}
+
+impl PermissionStatuses {
+    pub const fn state(self, capability: PermissionCapability) -> PermissionState {
+        match capability {
+            PermissionCapability::Accessibility => self.accessibility,
+            PermissionCapability::ScreenRecording => self.screen_recording,
+            PermissionCapability::Microphone => self.microphone,
+            PermissionCapability::LaunchAtLogin => self.launch_at_login,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OnboardingState {
+    pub completed: bool,
+    pub account_mode: Option<AccountMode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GoogleAuthStatus {
+    pub configured: bool,
+    pub signed_in: bool,
+    pub scopes: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -214,27 +296,6 @@ impl AccessibilityState {
     }
 }
 
-pub trait PermissionStateLabel {
-    fn label(self) -> &'static str;
-}
-
-impl PermissionStateLabel for PermissionState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Unknown => "Needs access",
-            Self::NotDetermined => "Not requested yet",
-            Self::Requesting => "Waiting for approval",
-            Self::Rechecking => "Checking access",
-            Self::Granted => "Granted",
-            Self::Denied => "Not granted",
-            Self::Restricted => "Restricted",
-            Self::Unsupported => "Unavailable on this Mac",
-            Self::RestartRequired => "Restart required",
-            Self::Revoked => "Revoked",
-        }
-    }
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessibilityActionRequest {
@@ -247,12 +308,6 @@ pub struct AccessibilityActionRequest {
 #[derive(Serialize)]
 struct AccessibilityActionArgs {
     request: AccessibilityActionRequest,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PermissionArgs {
-    capability: PermissionCapability,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -331,85 +386,6 @@ pub async fn capture_start() -> Result<CaptureStatus, String> {
     invoke("capture_start").await
 }
 
-pub async fn permission_recheck() -> Result<PermissionSnapshot, String> {
-    invoke("permission_recheck").await
-}
-
-pub async fn permission_request(
-    capability: PermissionCapability,
-) -> Result<PermissionSnapshot, String> {
-    invoke_with("permission_request", &PermissionArgs { capability }).await
-}
-
-pub async fn permission_open_settings(
-    capability: PermissionCapability,
-) -> Result<PermissionSnapshot, String> {
-    invoke_with("permission_open_settings", &PermissionArgs { capability }).await
-}
-
-type PermissionEventHandler = Closure<dyn FnMut(JsValue)>;
-
-struct PermissionSubscriptionState {
-    active: Cell<bool>,
-    handler: RefCell<Option<PermissionEventHandler>>,
-    unlisten: RefCell<Option<js_sys::Function>>,
-}
-
-pub struct PermissionSubscription {
-    state: Rc<PermissionSubscriptionState>,
-}
-
-impl Drop for PermissionSubscription {
-    fn drop(&mut self) {
-        self.state.active.set(false);
-        if let Some(unlisten) = self.state.unlisten.borrow_mut().take() {
-            let _ = unlisten.call0(&JsValue::UNDEFINED);
-        }
-        let _ = self.state.handler.borrow_mut().take();
-    }
-}
-
-pub fn subscribe_permissions(
-    mut on_snapshot: impl FnMut(PermissionSnapshot) + 'static,
-) -> Option<PermissionSubscription> {
-    if !is_available() {
-        return None;
-    }
-    let handler = Closure::wrap(Box::new(move |event: JsValue| {
-        let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload")) else {
-            return;
-        };
-        if let Ok(snapshot) = serde_wasm_bindgen::from_value::<PermissionSnapshot>(payload) {
-            on_snapshot(snapshot);
-        }
-    }) as Box<dyn FnMut(JsValue)>);
-    let state = Rc::new(PermissionSubscriptionState {
-        active: Cell::new(true),
-        handler: RefCell::new(Some(handler)),
-        unlisten: RefCell::new(None),
-    });
-    let handler = state
-        .handler
-        .borrow()
-        .as_ref()
-        .map(|handler| handler.as_ref().unchecked_ref::<js_sys::Function>().clone())?;
-    let async_state = state.clone();
-    spawn_local(async move {
-        let Ok(unlisten) = listen_for_event("permissions_changed", &handler).await else {
-            return;
-        };
-        let Ok(unlisten) = unlisten.dyn_into::<js_sys::Function>() else {
-            return;
-        };
-        if async_state.active.get() {
-            *async_state.unlisten.borrow_mut() = Some(unlisten);
-        } else {
-            let _ = unlisten.call0(&JsValue::UNDEFINED);
-        }
-    });
-    Some(PermissionSubscription { state })
-}
-
 pub async fn capture_stop() -> Result<CaptureStatus, String> {
     invoke("capture_stop").await
 }
@@ -428,6 +404,70 @@ pub async fn accessibility_stop() -> Result<AccessibilityStatus, String> {
 
 pub async fn accessibility_status() -> Result<AccessibilityStatus, String> {
     invoke("accessibility_status").await
+}
+
+pub async fn permission_statuses() -> Result<PermissionStatuses, String> {
+    invoke("permission_statuses").await
+}
+
+pub async fn permission_request(
+    capability: PermissionCapability,
+) -> Result<PermissionStatuses, String> {
+    invoke_with("permission_request", &PermissionRequestArgs { capability }).await
+}
+
+pub async fn permission_open_settings(capability: PermissionCapability) -> Result<(), String> {
+    invoke_with(
+        "permission_open_settings",
+        &PermissionRequestArgs { capability },
+    )
+    .await
+}
+
+pub async fn onboarding_state() -> Result<OnboardingState, String> {
+    invoke("onboarding_state").await
+}
+
+pub async fn onboarding_complete(account_mode: AccountMode) -> Result<OnboardingState, String> {
+    invoke_with("onboarding_complete", &AccountModeArgs { account_mode }).await
+}
+
+pub async fn onboarding_set_account_mode(
+    account_mode: AccountMode,
+) -> Result<OnboardingState, String> {
+    invoke_with(
+        "onboarding_set_account_mode",
+        &AccountModeArgs { account_mode },
+    )
+    .await
+}
+
+pub async fn onboarding_reset() -> Result<OnboardingState, String> {
+    invoke("onboarding_reset").await
+}
+
+pub async fn google_auth_status() -> Result<GoogleAuthStatus, String> {
+    invoke("google_auth_status").await
+}
+
+pub async fn google_auth_start() -> Result<GoogleAuthStatus, String> {
+    invoke("google_auth_start").await
+}
+
+pub async fn google_auth_sign_out() -> Result<GoogleAuthStatus, String> {
+    invoke("google_auth_sign_out").await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionRequestArgs {
+    capability: PermissionCapability,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountModeArgs {
+    account_mode: AccountMode,
 }
 
 pub async fn accessibility_action(
@@ -473,25 +513,6 @@ fn render_js_error(error: JsValue) -> String {
         .ok()
         .and_then(|value| value.as_string());
     match code.as_deref() {
-        Some("unsupported") => {
-            "This privacy capability is unavailable on the current macOS target.".to_owned()
-        }
-        Some("busy") => "Another permission check is still in progress.".to_owned(),
-        Some("probe_failed") => {
-            "Stalky could not verify this permission. Try Check again when the app is focused."
-                .to_owned()
-        }
-        Some("request_failed") => {
-            "The permission request could not be completed. You can retry or use System Settings."
-                .to_owned()
-        }
-        Some("settings_failed") => {
-            "System Settings could not be opened. Open System Settings → Privacy & Security manually."
-                .to_owned()
-        }
-        Some("invalid_transition") => {
-            "That permission action is not available in the current state.".to_owned()
-        }
         Some("permission_not_granted") => {
             "Screen Recording permission is required. Enable Stalky in System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
                 .to_owned()

@@ -1,6 +1,6 @@
 use mega_core::{PermissionCapability, PermissionState};
 
-use crate::{PlatformError, PlatformFeature, PlatformOperation};
+use crate::{PlatformError, PlatformFeature};
 
 pub(crate) fn permission_status(
     capability: PermissionCapability,
@@ -9,6 +9,7 @@ pub(crate) fn permission_status(
         PermissionCapability::Accessibility => PlatformFeature::AccessibilityPermission,
         PermissionCapability::ScreenRecording => PlatformFeature::ScreenRecordingPermission,
         PermissionCapability::Microphone => PlatformFeature::MicrophonePermission,
+        PermissionCapability::LaunchAtLogin => PlatformFeature::LaunchAtLoginPermission,
     };
     Err(PlatformError::unsupported(feature))
 }
@@ -16,29 +17,5 @@ pub(crate) fn permission_status(
 pub(crate) fn request_permission(
     capability: PermissionCapability,
 ) -> Result<PermissionState, PlatformError> {
-    let feature = feature_for(capability);
-    Err(PlatformError::Native {
-        feature,
-        operation: PlatformOperation::Request,
-        message: "privacy permissions are available only on macOS".to_owned(),
-    })
-}
-
-pub(crate) fn open_permission_settings(
-    capability: PermissionCapability,
-) -> Result<(), PlatformError> {
-    let feature = feature_for(capability);
-    Err(PlatformError::Native {
-        feature,
-        operation: PlatformOperation::OpenSettings,
-        message: "System Settings privacy panes are available only on macOS".to_owned(),
-    })
-}
-
-fn feature_for(capability: PermissionCapability) -> PlatformFeature {
-    match capability {
-        PermissionCapability::Accessibility => PlatformFeature::AccessibilityPermission,
-        PermissionCapability::ScreenRecording => PlatformFeature::ScreenRecordingPermission,
-        PermissionCapability::Microphone => PlatformFeature::MicrophonePermission,
-    }
+    permission_status(capability)
 }

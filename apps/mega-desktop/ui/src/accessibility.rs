@@ -4,8 +4,9 @@ use leptos::task::spawn_local;
 
 use crate::tauri::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityNode, AccessibilityStatus,
-    PermissionState, PermissionStateLabel, accessibility_action, accessibility_start,
-    accessibility_status, accessibility_stop, is_available, permission_request,
+    PermissionCapability, PermissionState, accessibility_action, accessibility_start,
+    accessibility_status, accessibility_stop, is_available, permission_open_settings,
+    permission_request,
 };
 
 #[component]
@@ -68,24 +69,30 @@ pub fn Accessibility() -> impl IntoView {
         if busy.get_untracked() {
             return;
         }
+        let permission = status.get_untracked().permission;
         set_busy.set(true);
         set_message.set(None);
         spawn_local(async move {
-            match permission_request(crate::tauri::PermissionCapability::Accessibility).await {
-                Ok(snapshot) => {
-                    let permission = snapshot
-                        .statuses
-                        .iter()
-                        .find(|status| {
-                            status.capability == crate::tauri::PermissionCapability::Accessibility
-                        })
-                        .map(|status| status.authorization)
-                        .unwrap_or(PermissionState::Unknown);
+            let result = if permission.needs_settings() {
+                permission_open_settings(PermissionCapability::Accessibility)
+                    .await
+                    .map(|_| permission)
+            } else if permission == PermissionState::Granted {
+                accessibility_status().await.map(|next| next.permission)
+            } else {
+                permission_request(PermissionCapability::Accessibility)
+                    .await
+                    .map(|statuses| statuses.accessibility)
+            };
+            match result {
+                Ok(permission) => {
                     set_status.update(|current| current.permission = permission);
                     let copy = if permission == PermissionState::Granted {
                         "Accessibility access is ready."
+                    } else if permission.needs_settings() {
+                        "Open System Settings to change Accessibility access, then return to Stalky."
                     } else {
-                        "Approve Stalky in System Settings, then press Retest access."
+                        "Approve Stalky in the macOS permission sheet, then continue."
                     };
                     set_message.set(Some(copy.to_owned()));
                 }
@@ -138,7 +145,7 @@ pub fn Accessibility() -> impl IntoView {
                 <p>"A live, bounded view of the focused macOS interface. Stalky exposes only controls the selected element currently supports."</p>
                 <div class="ax-heading-actions">
                     <button class="secondary-button" disabled=move || busy.get() on:click=request_access>
-                        {move || if status.get().permission == PermissionState::Granted { "Retest access" } else { "Grant access" }}
+                        {move || if status.get().permission == PermissionState::Granted { "Check access" } else if status.get().permission.needs_settings() { "Open Settings" } else { "Request access" }}
                     </button>
                     <button class="primary-dock-button ax-primary" disabled=move || busy.get() on:click=toggle_observation>
                         {move || if busy.get() { "Working…" } else if status.get().needs_stop() { "Stop observation" } else { "Start observation" }}

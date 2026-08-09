@@ -10,11 +10,7 @@ thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
-dispatch2.workspace = true
 objc2.workspace = true
 objc2-application-services = { workspace = true, features = ["AXUIElement", "HIServices"] }
-objc2-app-kit = { workspace = true, features = ["NSWorkspace"] }
-objc2-avf-audio = { workspace = true, features = ["AVAudioApplication", "block2"] }
-objc2-core-foundation = { workspace = true, features = ["CFDictionary", "CFNumber", "CFString"] }
+objc2-avf-audio = { workspace = true, features = ["AVAudioApplication"] }
 objc2-core-graphics = { workspace = true, features = ["CGWindow"] }
-objc2-foundation = { workspace = true, features = ["NSString", "NSThread", "NSURL"] }

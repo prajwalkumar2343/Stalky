@@ -18,25 +18,6 @@ impl Tone {
 }
 
 #[component]
-pub fn StatusRow(
-    label: &'static str,
-    detail: &'static str,
-    value: &'static str,
-    tone: Tone,
-) -> impl IntoView {
-    view! {
-        <div class="status-row">
-            <span class=format!("status-dot {}", tone.class_name()) aria-hidden="true"></span>
-            <div class="status-copy">
-                <strong>{label}</strong>
-                <span>{detail}</span>
-            </div>
-            <span class=format!("status-value {}", tone.class_name())>{value}</span>
-        </div>
-    }
-}
-
-#[component]
 pub fn MetricCard(
     eyebrow: &'static str,
     value: &'static str,
@@ -75,7 +56,7 @@ pub fn EventRow(
                 <div><strong>{title}</strong><span>{source}</span></div>
                 <p>{detail}</p>
             </div>
-            <button class="icon-button small" aria-label=format!("Inspect {title}") title="Inspect event">"↗"</button>
+            <button class="icon-button small" disabled aria-label=format!("Inspect {title}") title="Event inspection is not available in this build">"↗"</button>
         </div>
     }
 }
