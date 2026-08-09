@@ -161,6 +161,16 @@ impl AccessibilityBackend for NativeBackend {
             PermissionState::Denied
         })
     }
+
+    fn permission_status(&self) -> Result<PermissionState, AccessibilityError> {
+        // Retesting must never set kAXTrustedCheckOptionPrompt. This path is
+        // used by status polling and window-focus rechecks.
+        Ok(if unsafe { AXIsProcessTrusted() } {
+            PermissionState::Granted
+        } else {
+            PermissionState::Denied
+        })
+    }
 }
 
 struct NativeSession {

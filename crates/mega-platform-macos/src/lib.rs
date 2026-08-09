@@ -31,14 +31,31 @@ pub enum PlatformFeature {
 
 /// Failure returned when a platform capability is unavailable in this adapter.
 #[derive(Debug, Error, Eq, PartialEq)]
-#[error("{feature:?} is unsupported on this target")]
+#[error("{feature:?} is unavailable ({kind:?})")]
 pub struct PlatformError {
     pub feature: PlatformFeature,
+    pub kind: PlatformErrorKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformErrorKind {
+    Unsupported,
+    RequestTimeout,
 }
 
 impl PlatformError {
     const fn unsupported(feature: PlatformFeature) -> Self {
-        Self { feature }
+        Self {
+            feature,
+            kind: PlatformErrorKind::Unsupported,
+        }
+    }
+
+    const fn request_timeout(feature: PlatformFeature) -> Self {
+        Self {
+            feature,
+            kind: PlatformErrorKind::RequestTimeout,
+        }
     }
 }
 
@@ -73,6 +90,17 @@ impl MacOsPlatform {
     /// Reads AVFAudio record permission without requesting it.
     pub fn microphone_permission_status(&self) -> Result<PermissionState, PlatformError> {
         self.permission_status(PermissionCapability::Microphone)
+    }
+
+    /// Requests one protected capability after an explicit user action.
+    ///
+    /// This method is intentionally separate from [`Self::permission_status`]
+    /// so read-only status refreshes can never trigger a system prompt.
+    pub fn request_permission(
+        &self,
+        capability: PermissionCapability,
+    ) -> Result<PermissionState, PlatformError> {
+        platform::request_permission(capability)
     }
 
     /// Reads all permission states supported by this adapter in one snapshot.
@@ -234,6 +262,7 @@ mod tests {
                         PermissionCapability::Microphone => PlatformFeature::MicrophonePermission,
                         PermissionCapability::LaunchAtLogin => unreachable!(),
                     },
+                    kind: PlatformErrorKind::Unsupported,
                 })
             );
         }

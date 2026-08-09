@@ -1,6 +1,7 @@
 mod accessibility;
 mod app;
 mod components;
+mod onboarding;
 mod tauri;
 
 fn main() {

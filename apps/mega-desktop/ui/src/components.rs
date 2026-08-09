@@ -18,25 +18,6 @@ impl Tone {
 }
 
 #[component]
-pub fn StatusRow(
-    label: &'static str,
-    detail: &'static str,
-    value: &'static str,
-    tone: Tone,
-) -> impl IntoView {
-    view! {
-        <div class="status-row">
-            <span class=format!("status-dot {}", tone.class_name()) aria-hidden="true"></span>
-            <div class="status-copy">
-                <strong>{label}</strong>
-                <span>{detail}</span>
-            </div>
-            <span class=format!("status-value {}", tone.class_name())>{value}</span>
-        </div>
-    }
-}
-
-#[component]
 pub fn MetricCard(
     eyebrow: &'static str,
     value: &'static str,
@@ -77,27 +58,6 @@ pub fn EventRow(
             </div>
             <button class="icon-button small" aria-label=format!("Inspect {title}") title="Inspect event">"↗"</button>
         </div>
-    }
-}
-
-#[component]
-pub fn PermissionCard(
-    number: &'static str,
-    title: &'static str,
-    body: &'static str,
-    granted: bool,
-) -> impl IntoView {
-    view! {
-        <article class="permission-card">
-            <span class="permission-number">{number}</span>
-            <div>
-                <h3>{title}</h3>
-                <p>{body}</p>
-            </div>
-            <span class="permission-state" class:granted=granted>
-                {if granted { "Granted" } else { "Not requested" }}
-            </span>
-        </article>
     }
 }
 

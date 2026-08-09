@@ -13,3 +13,9 @@ pub(crate) fn permission_status(
     };
     Err(PlatformError::unsupported(feature))
 }
+
+pub(crate) fn request_permission(
+    capability: PermissionCapability,
+) -> Result<PermissionState, PlatformError> {
+    permission_status(capability)
+}

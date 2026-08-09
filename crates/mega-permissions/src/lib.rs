@@ -26,6 +26,7 @@ pub enum PermissionState {
     Restricted,
     RestartRequired,
     Revoked,
+    Unsupported,
 }
 
 pub type PermissionStatus = PermissionState;
@@ -36,7 +37,43 @@ impl PermissionState {
     }
 
     pub fn needs_user_action(self) -> bool {
-        matches!(self, Self::NotRequested | Self::Denied | Self::Restricted)
+        matches!(
+            self,
+            Self::NotRequested | Self::Denied | Self::Restricted | Self::Revoked
+        )
+    }
+}
+
+/// The only legal outcomes for an explicit permission request intent.
+///
+/// This policy deliberately distinguishes a first request from recovery after
+/// a denial. The latter always routes the user to System Settings instead of
+/// repeatedly invoking a prompt-capable native API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PermissionRequestDecision {
+    Request,
+    AlreadyGranted,
+    AlreadyRequesting,
+    OpenSettings,
+    Unsupported,
+}
+
+pub const fn permission_request_decision(
+    state: PermissionState,
+    has_requested: bool,
+) -> PermissionRequestDecision {
+    match state {
+        PermissionState::Granted => PermissionRequestDecision::AlreadyGranted,
+        PermissionState::Requesting => PermissionRequestDecision::AlreadyRequesting,
+        PermissionState::Unsupported => PermissionRequestDecision::Unsupported,
+        PermissionState::Restricted | PermissionState::Revoked => {
+            PermissionRequestDecision::OpenSettings
+        }
+        PermissionState::Denied if has_requested => PermissionRequestDecision::OpenSettings,
+        PermissionState::Unknown
+        | PermissionState::NotRequested
+        | PermissionState::Denied
+        | PermissionState::RestartRequired => PermissionRequestDecision::Request,
     }
 }
 
@@ -292,6 +329,44 @@ mod tests {
         assert_eq!(
             snapshot.get(PermissionCapability::ScreenRecording),
             Some(PermissionState::Unknown)
+        );
+    }
+
+    #[test]
+    fn denied_permission_is_requestable_once_then_routes_to_settings() {
+        assert_eq!(
+            super::permission_request_decision(PermissionState::Denied, false),
+            super::PermissionRequestDecision::Request
+        );
+        assert_eq!(
+            super::permission_request_decision(PermissionState::Denied, true),
+            super::PermissionRequestDecision::OpenSettings
+        );
+    }
+
+    #[test]
+    fn restricted_and_revoked_permissions_always_route_to_settings() {
+        for state in [PermissionState::Restricted, PermissionState::Revoked] {
+            assert_eq!(
+                super::permission_request_decision(state, false),
+                super::PermissionRequestDecision::OpenSettings
+            );
+            assert_eq!(
+                super::permission_request_decision(state, true),
+                super::PermissionRequestDecision::OpenSettings
+            );
+        }
+    }
+
+    #[test]
+    fn requesting_and_unsupported_capabilities_never_reenter_request_path() {
+        assert_eq!(
+            super::permission_request_decision(PermissionState::Requesting, false),
+            super::PermissionRequestDecision::AlreadyRequesting
+        );
+        assert_eq!(
+            super::permission_request_decision(PermissionState::Unsupported, false),
+            super::PermissionRequestDecision::Unsupported
         );
     }
 }

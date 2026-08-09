@@ -19,6 +19,10 @@ impl AccessibilityBackend for UnsupportedBackend {
     fn request_permission(&self) -> Result<PermissionState, AccessibilityError> {
         Err(AccessibilityError::UnsupportedTarget)
     }
+
+    fn permission_status(&self) -> Result<PermissionState, AccessibilityError> {
+        Err(AccessibilityError::UnsupportedTarget)
+    }
 }
 
 #[allow(dead_code)]

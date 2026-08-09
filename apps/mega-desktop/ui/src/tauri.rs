@@ -51,6 +51,88 @@ pub enum PermissionState {
     Restricted,
     RestartRequired,
     Revoked,
+    Unsupported,
+}
+
+impl PermissionState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::NotRequested => "Not requested",
+            Self::Requesting => "Waiting for approval",
+            Self::Granted => "Granted",
+            Self::Denied => "Not granted",
+            Self::Restricted => "Restricted",
+            Self::RestartRequired => "Restart required",
+            Self::Revoked => "Revoked",
+            Self::Unsupported => "Optional",
+        }
+    }
+
+    pub const fn is_granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+
+    pub const fn needs_settings(self) -> bool {
+        matches!(
+            self,
+            Self::Denied | Self::Restricted | Self::Revoked | Self::RestartRequired
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCapability {
+    #[default]
+    Accessibility,
+    ScreenRecording,
+    Microphone,
+    LaunchAtLogin,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountMode {
+    #[default]
+    Local,
+    Google,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PermissionStatuses {
+    pub accessibility: PermissionState,
+    pub screen_recording: PermissionState,
+    pub microphone: PermissionState,
+    pub launch_at_login: PermissionState,
+    pub launch_at_login_supported: bool,
+}
+
+impl PermissionStatuses {
+    pub const fn state(self, capability: PermissionCapability) -> PermissionState {
+        match capability {
+            PermissionCapability::Accessibility => self.accessibility,
+            PermissionCapability::ScreenRecording => self.screen_recording,
+            PermissionCapability::Microphone => self.microphone,
+            PermissionCapability::LaunchAtLogin => self.launch_at_login,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OnboardingState {
+    pub completed: bool,
+    pub account_mode: Option<AccountMode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GoogleAuthStatus {
+    pub configured: bool,
+    pub signed_in: bool,
+    pub scopes: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -214,21 +296,6 @@ impl AccessibilityState {
     }
 }
 
-impl PermissionState {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Unknown => "Unknown",
-            Self::NotRequested => "Not requested",
-            Self::Requesting => "Waiting for approval",
-            Self::Granted => "Granted",
-            Self::Denied => "Not granted",
-            Self::Restricted => "Restricted",
-            Self::RestartRequired => "Restart required",
-            Self::Revoked => "Revoked",
-        }
-    }
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessibilityActionRequest {
@@ -339,8 +406,68 @@ pub async fn accessibility_status() -> Result<AccessibilityStatus, String> {
     invoke("accessibility_status").await
 }
 
-pub async fn accessibility_request() -> Result<PermissionState, String> {
-    invoke("accessibility_request").await
+pub async fn permission_statuses() -> Result<PermissionStatuses, String> {
+    invoke("permission_statuses").await
+}
+
+pub async fn permission_request(
+    capability: PermissionCapability,
+) -> Result<PermissionStatuses, String> {
+    invoke_with("permission_request", &PermissionRequestArgs { capability }).await
+}
+
+pub async fn permission_open_settings(capability: PermissionCapability) -> Result<(), String> {
+    invoke_with(
+        "permission_open_settings",
+        &PermissionRequestArgs { capability },
+    )
+    .await
+}
+
+pub async fn onboarding_state() -> Result<OnboardingState, String> {
+    invoke("onboarding_state").await
+}
+
+pub async fn onboarding_complete(account_mode: AccountMode) -> Result<OnboardingState, String> {
+    invoke_with("onboarding_complete", &AccountModeArgs { account_mode }).await
+}
+
+pub async fn onboarding_set_account_mode(
+    account_mode: AccountMode,
+) -> Result<OnboardingState, String> {
+    invoke_with(
+        "onboarding_set_account_mode",
+        &AccountModeArgs { account_mode },
+    )
+    .await
+}
+
+pub async fn onboarding_reset() -> Result<OnboardingState, String> {
+    invoke("onboarding_reset").await
+}
+
+pub async fn google_auth_status() -> Result<GoogleAuthStatus, String> {
+    invoke("google_auth_status").await
+}
+
+pub async fn google_auth_start() -> Result<GoogleAuthStatus, String> {
+    invoke("google_auth_start").await
+}
+
+pub async fn google_auth_sign_out() -> Result<GoogleAuthStatus, String> {
+    invoke("google_auth_sign_out").await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionRequestArgs {
+    capability: PermissionCapability,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountModeArgs {
+    account_mode: AccountMode,
 }
 
 pub async fn accessibility_action(

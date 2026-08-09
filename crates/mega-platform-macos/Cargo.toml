@@ -9,6 +9,8 @@ mega-core.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+objc2.workspace = true
 objc2-application-services = { workspace = true, features = ["AXUIElement", "HIServices"] }
 objc2-avf-audio = { workspace = true, features = ["AVAudioApplication"] }
 objc2-core-graphics = { workspace = true, features = ["CGWindow"] }

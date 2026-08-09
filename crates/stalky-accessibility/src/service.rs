@@ -59,6 +59,7 @@ pub trait AccessibilityBackend: Send + Sync {
         events: Arc<dyn AccessibilityEventSink>,
     ) -> Result<Box<dyn AccessibilitySession>, AccessibilityError>;
     fn request_permission(&self) -> Result<PermissionState, AccessibilityError>;
+    fn permission_status(&self) -> Result<PermissionState, AccessibilityError>;
 }
 
 #[allow(dead_code)]
@@ -231,6 +232,25 @@ impl AccessibilityService {
             .map_err(|_| AccessibilityError::WorkerStopped)?;
         inner.permission = permission;
         Ok(permission)
+    }
+
+    /// Re-reads Accessibility trust without enabling the OS prompt option.
+    pub fn refresh_permission(&self) -> Result<AccessibilityStatus, AccessibilityError> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| AccessibilityError::WorkerStopped)?;
+        let permission = self.backend.permission_status()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| AccessibilityError::WorkerStopped)?;
+        inner.permission = permission;
+        if permission != PermissionState::Granted && inner.state == AccessibilityState::Running {
+            inner.state = AccessibilityState::Failed;
+            inner.session = None;
+        }
+        Ok(status_from_inner(&inner))
     }
 
     pub fn execute(
@@ -446,6 +466,27 @@ mod tests {
                 PermissionState::Denied
             })
         }
+
+        fn permission_status(&self) -> Result<PermissionState, AccessibilityError> {
+            Ok(if self.trusted {
+                PermissionState::Granted
+            } else {
+                PermissionState::Denied
+            })
+        }
+    }
+
+    #[test]
+    fn permission_refresh_rechecks_os_truth_without_requesting_again() {
+        let service = AccessibilityService::with_backend(FakeBackend {
+            starts: Arc::new(Mutex::new(0)),
+            trusted: false,
+            emit_events: false,
+        });
+        assert_eq!(
+            service.refresh_permission().unwrap().permission,
+            PermissionState::Denied
+        );
     }
 
     #[test]
