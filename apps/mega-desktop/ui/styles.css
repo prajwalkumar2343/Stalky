@@ -229,6 +229,8 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .dock-button, .primary-dock-button, .secondary-button, .hold-button { height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); cursor: pointer; transition: transform 130ms ease, background 130ms ease; }
 .dock-button { display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; color: var(--ink-soft); font-size: 11px; }
 .dock-button:hover, .dock-button.active { background: var(--surface-muted); color: var(--ink); }.dock-button:active, .primary-dock-button:active { transform: scale(.98); }
+.dock-button:disabled, .filter-button:disabled, .profile-row:disabled { cursor: not-allowed; opacity: .55; }
+.dock-button:disabled:hover, .filter-button:disabled:hover, .profile-row:disabled:hover { background: transparent; color: inherit; }
 .primary-dock-button { display: inline-flex; align-items: center; gap: 7px; margin-left: 4px; padding: 0 13px; border-color: var(--ink); background: var(--ink); color: var(--surface); font-size: 11px; }
 .primary-dock-button:disabled { cursor: wait; opacity: .58; }
 .ax-dock-note { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 10px; }.ax-dock-note i { width: 7px; height: 7px; border: 1px solid var(--good); border-radius: 50%; }
@@ -297,7 +299,7 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* First-run surface: calm, legible, and intentionally separate from the
    operational shell underneath it. */
-.app-obscured { filter: saturate(.72); }
+.app-obscured { visibility: hidden; }
 .onboarding-shell { position: fixed; z-index: 20; inset: 0; display: grid; grid-template-rows: auto auto 1fr auto; min-width: 960px; min-height: 640px; padding: 32px clamp(36px, 7vw, 108px) 24px; overflow: auto; background: var(--canvas); color: var(--ink); }
 .onboarding-glow { position: absolute; top: -20%; right: 8%; width: 48vw; height: 48vw; max-width: 640px; max-height: 640px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--focus) 10%, transparent), transparent 65%); pointer-events: none; }
 .onboarding-brand, .onboarding-footer, .onboarding-progress { position: relative; z-index: 1; display: flex; align-items: center; }
@@ -333,7 +335,7 @@ button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 @media (max-width: 1080px) {
   .app-shell { grid-template-columns: 220px minmax(520px, 1fr) 0; }
-  .inspector { visibility: hidden; opacity: 0; }
+  .inspector { display: none; }
   .control-dock { grid-column: 2 / -1; }
   .dock-context { display: none; }
   .control-dock { justify-content: flex-end; }

@@ -44,6 +44,7 @@ impl PreferenceStore {
         let values = fs::read_to_string(&path)
             .ok()
             .and_then(|contents| serde_json::from_str(&contents).ok())
+            .filter(|values: &StoredPreferences| values.version <= PREFERENCES_VERSION)
             .unwrap_or_else(|| StoredPreferences {
                 version: PREFERENCES_VERSION,
                 ..StoredPreferences::default()
@@ -108,9 +109,10 @@ impl PreferenceStore {
             .values
             .lock()
             .map_err(|_| "Local preference storage is unavailable.".to_owned())?;
-        update(&mut values);
-        values.version = PREFERENCES_VERSION;
-        let encoded = serde_json::to_vec_pretty(&*values)
+        let mut next = values.clone();
+        update(&mut next);
+        next.version = PREFERENCES_VERSION;
+        let encoded = serde_json::to_vec_pretty(&next)
             .map_err(|error| format!("could not encode local preferences: {error}"))?;
         let parent = self
             .path
@@ -122,7 +124,9 @@ impl PreferenceStore {
         fs::write(&temporary, encoded)
             .map_err(|error| format!("could not write local preferences: {error}"))?;
         fs::rename(&temporary, &self.path)
-            .map_err(|error| format!("could not commit local preferences: {error}"))
+            .map_err(|error| format!("could not commit local preferences: {error}"))?;
+        *values = next;
+        Ok(())
     }
 }
 
@@ -174,5 +178,34 @@ mod tests {
         );
         assert!(reloaded.has_requested(PermissionCapability::Accessibility));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_corrupt_and_future_preferences_recover_to_local_defaults() {
+        for contents in [
+            Some("{not-json"),
+            Some(r#"{"version":99,"onboarding_completed":true}"#),
+            None,
+        ] {
+            let path = temporary_path();
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let store = PreferenceStore::new(path.clone());
+            assert!(!store.onboarding_state().completed);
+            assert_eq!(store.onboarding_state().account_mode, None);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn failed_persistence_does_not_change_the_in_memory_snapshot() {
+        let path = temporary_path();
+        std::fs::create_dir_all(&path).unwrap();
+        let store = PreferenceStore::new(path.clone());
+        assert!(store.complete_onboarding(AccountMode::Local).is_err());
+        assert!(!store.onboarding_state().completed);
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

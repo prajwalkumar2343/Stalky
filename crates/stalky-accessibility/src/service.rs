@@ -241,15 +241,37 @@ impl AccessibilityService {
             .lock()
             .map_err(|_| AccessibilityError::WorkerStopped)?;
         let permission = self.backend.permission_status()?;
-        let mut inner = self
+        let mut session = None;
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| AccessibilityError::WorkerStopped)?;
+            inner.permission = permission;
+            if permission != PermissionState::Granted && inner.state == AccessibilityState::Running
+            {
+                inner.state = AccessibilityState::Failed;
+                inner.snapshot = None;
+                inner.recent_events.clear();
+                session = inner.session.take();
+            }
+        }
+
+        if let Some(mut session) = session
+            && let Err(error) = session.stop()
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| AccessibilityError::WorkerStopped)?;
+            inner.last_error = Some(error.diagnostic());
+            inner.metrics.errors = inner.metrics.errors.saturating_add(1);
+        }
+
+        let inner = self
             .inner
             .lock()
             .map_err(|_| AccessibilityError::WorkerStopped)?;
-        inner.permission = permission;
-        if permission != PermissionState::Granted && inner.state == AccessibilityState::Running {
-            inner.state = AccessibilityState::Failed;
-            inner.session = None;
-        }
         Ok(status_from_inner(&inner))
     }
 
@@ -409,6 +431,8 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::AccessibilityAction;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct FakeBackend {
@@ -417,6 +441,59 @@ mod tests {
         emit_events: bool,
     }
     struct FakeSession;
+
+    struct RevocableBackend {
+        trusted: Arc<AtomicBool>,
+        stop_calls: Arc<AtomicUsize>,
+    }
+
+    struct RevocableSession {
+        stop_calls: Arc<AtomicUsize>,
+    }
+
+    impl AccessibilitySession for RevocableSession {
+        fn stop(&mut self) -> Result<(), AccessibilityError> {
+            self.stop_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn execute(
+            &mut self,
+            request: AccessibilityActionRequest,
+        ) -> Result<AccessibilityActionResult, AccessibilityError> {
+            Ok(AccessibilityActionResult {
+                executed: true,
+                element: request.element,
+                action: request.action,
+            })
+        }
+    }
+
+    impl AccessibilityBackend for RevocableBackend {
+        fn start(
+            &self,
+            _events: Arc<dyn AccessibilityEventSink>,
+        ) -> Result<Box<dyn AccessibilitySession>, AccessibilityError> {
+            if !self.trusted.load(Ordering::Relaxed) {
+                return Err(AccessibilityError::NotTrusted);
+            }
+            Ok(Box::new(RevocableSession {
+                stop_calls: Arc::clone(&self.stop_calls),
+            }))
+        }
+
+        fn request_permission(&self) -> Result<PermissionState, AccessibilityError> {
+            Ok(if self.trusted.load(Ordering::Relaxed) {
+                PermissionState::Granted
+            } else {
+                PermissionState::Denied
+            })
+        }
+
+        fn permission_status(&self) -> Result<PermissionState, AccessibilityError> {
+            self.request_permission()
+        }
+    }
 
     impl AccessibilitySession for FakeSession {
         fn stop(&mut self) -> Result<(), AccessibilityError> {
@@ -487,6 +564,34 @@ mod tests {
             service.refresh_permission().unwrap().permission,
             PermissionState::Denied
         );
+    }
+
+    #[test]
+    fn permission_revocation_stops_the_native_session_before_reporting_failure() {
+        let trusted = Arc::new(AtomicBool::new(true));
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let service = AccessibilityService::with_backend(RevocableBackend {
+            trusted: Arc::clone(&trusted),
+            stop_calls: Arc::clone(&stop_calls),
+        });
+        assert_eq!(service.start().unwrap().state, AccessibilityState::Running);
+        trusted.store(false, Ordering::Relaxed);
+
+        let status = service.refresh_permission().unwrap();
+        assert_eq!(status.state, AccessibilityState::Failed);
+        assert_eq!(status.permission, PermissionState::Denied);
+        assert_eq!(stop_calls.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            service.execute(AccessibilityActionRequest {
+                element: AccessibilityElementId {
+                    id: "stale".to_owned(),
+                    generation: 1,
+                },
+                action: AccessibilityAction::Press,
+                value: None,
+            }),
+            Err(AccessibilityError::NotRunning)
+        ));
     }
 
     #[test]

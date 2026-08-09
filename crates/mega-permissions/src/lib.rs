@@ -70,10 +70,10 @@ pub const fn permission_request_decision(
             PermissionRequestDecision::OpenSettings
         }
         PermissionState::Denied if has_requested => PermissionRequestDecision::OpenSettings,
-        PermissionState::Unknown
-        | PermissionState::NotRequested
-        | PermissionState::Denied
-        | PermissionState::RestartRequired => PermissionRequestDecision::Request,
+        PermissionState::Unknown | PermissionState::NotRequested | PermissionState::Denied => {
+            PermissionRequestDecision::Request
+        }
+        PermissionState::RestartRequired => PermissionRequestDecision::OpenSettings,
     }
 }
 
@@ -367,6 +367,14 @@ mod tests {
         assert_eq!(
             super::permission_request_decision(PermissionState::Unsupported, false),
             super::PermissionRequestDecision::Unsupported
+        );
+    }
+
+    #[test]
+    fn restart_required_permissions_route_to_system_settings() {
+        assert_eq!(
+            super::permission_request_decision(PermissionState::RestartRequired, false),
+            super::PermissionRequestDecision::OpenSettings
         );
     }
 }

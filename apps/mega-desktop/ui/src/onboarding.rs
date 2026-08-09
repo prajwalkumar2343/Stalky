@@ -144,7 +144,7 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
     };
 
     view! {
-        <main class="onboarding-shell" aria-labelledby="onboarding-title">
+        <main class="onboarding-shell" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabindex="-1">
             <div class="onboarding-glow" aria-hidden="true"></div>
             <header class="onboarding-brand">
                 <span class="stalky-mark" aria-hidden="true"><i></i><i></i></span>

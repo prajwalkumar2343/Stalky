@@ -56,7 +56,7 @@ pub fn EventRow(
                 <div><strong>{title}</strong><span>{source}</span></div>
                 <p>{detail}</p>
             </div>
-            <button class="icon-button small" aria-label=format!("Inspect {title}") title="Inspect event">"↗"</button>
+            <button class="icon-button small" disabled aria-label=format!("Inspect {title}") title="Event inspection is not available in this build">"↗"</button>
         </div>
     }
 }

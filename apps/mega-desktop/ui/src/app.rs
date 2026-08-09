@@ -142,7 +142,19 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <div class="app-shell" class:inspector-closed=move || !inspector_open.get() || section.get() == Section::Accessibility class:app-obscured=move || onboarding.get().is_none_or(|state| !state.completed)>
+        <div
+            class="app-shell"
+            class:inspector-closed=move || !inspector_open.get() || section.get() == Section::Accessibility
+            class:app-obscured=move || onboarding.get().is_none_or(|state| !state.completed)
+            aria-hidden=move || {
+                if onboarding.get().is_none_or(|state| !state.completed) {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
+            inert=move || onboarding.get().is_none_or(|state| !state.completed)
+        >
             <header class="titlebar" data-tauri-drag-region="true">
                 <div class="traffic-space" aria-hidden="true"></div>
                 <div class="workspace-identity">
@@ -193,7 +205,7 @@ pub fn App() -> impl IntoView {
                     <div class="health-ring" aria-hidden="true"><span></span></div>
                     <div><strong>"Local runtime ready"</strong><span>"Protected services are opt-in"</span></div>
                 </div>
-                <button class="profile-row">
+                <button class="profile-row" disabled title="Workspace profile is not available in this build">
                     <span class="avatar">"M"</span>
                     <span><strong>"Local workspace"</strong><small>"On this Mac"</small></span>
                     <span class="more">"···"</span>
@@ -247,8 +259,8 @@ pub fn App() -> impl IntoView {
                     } else {
                         view! {
                             <button class="dock-button" class:active=move || private.get() on:click=move |_| set_private.update(|value| *value = !*value)><span>"◇"</span>{move || if private.get() { "Private on" } else { "Private" }}</button>
-                            <button class="dock-button"><span>"◉"</span>"Snapshot"</button>
-                            <button class="dock-button"><span>"≋"</span>"Mic test"</button>
+                            <button class="dock-button" disabled title="Snapshot is not available in this build"><span>"◉"</span>"Snapshot"</button>
+                            <button class="dock-button" disabled title="Microphone testing is available from the Audio section"><span>"≋"</span>"Mic test"</button>
                             <button class="primary-dock-button" disabled=move || capture_busy.get() on:click=toggle_capture>
                                 <span>{move || if capture.get().needs_stop() { "Ⅱ" } else { "▶" }}</span>{move || if capture_busy.get() { "Working…" } else { match capture.get().state { CaptureState::Running => "Pause capture", CaptureState::Failed => "Reset capture", _ => "Start capture" } }}
                             </button>
@@ -301,13 +313,13 @@ fn Overview(
                 <LiveStatusRow label="Microphone" detail="No input session active" state=Signal::derive(move || permissions.get().microphone) />
                 <LiveStatusRow label="Background" detail="Launch at login" state=Signal::derive(move || permissions.get().launch_at_login) />
             </div>
-            <div class="section-heading"><div><span>"Live performance"</span><h2>"A light footprint."</h2></div><button class="text-button">"Open diagnostics" <span>"→"</span></button></div>
+            <div class="section-heading"><div><span>"Live performance"</span><h2>"A light footprint."</h2></div><button class="text-button" disabled title="Diagnostics navigation is not available in this build">"Open diagnostics" <span>"→"</span></button></div>
             <div class="metric-grid">
                 <article class="metric-card"><div class="metric-topline"><span>"Accepted frames"</span><span class="metric-trend">"this run"</span></div><div class="metric-value">{move || capture.get().metrics.accepted_frames}<small>" frames"</small></div><div class="meter-track" aria-hidden="true"><span style="width: 28%"></span></div></article>
                 <MetricCard eyebrow="CPU" value="3.2" suffix="%" trend="−0.4%" meter=20 />
                 <MetricCard eyebrow="Memory" value="186" suffix=" MB" trend="steady" meter=42 />
             </div>
-            <div class="section-heading compact"><div><span>"Activity"</span><h2>"Recent events"</h2></div><button class="filter-button">"All systems" <span>"⌄"</span></button></div>
+            <div class="section-heading compact"><div><span>"Activity"</span><h2>"Recent events"</h2></div><button class="filter-button" disabled title="Event filtering is not available in this build">"All systems" <span>"⌄"</span></button></div>
             <div class="event-list">
                 <EventRow time="Now" source="Capture" title="Frame changed" detail="18% of the active display changed; preview refreshed." tone=Tone::Good />
                 <EventRow time="−12s" source="Accessibility" title="Focus moved" detail="Focused window changed from Finder to Safari." tone=Tone::Quiet />
@@ -326,6 +338,7 @@ fn Capture(
 ) -> impl IntoView {
     let screen_permission = Signal::derive(move || permissions.get().screen_recording);
     let (permission_busy, set_permission_busy) = signal(false);
+    let (permission_message, set_permission_message) = signal(None::<String>);
     let request_screen_permission = move |_| {
         if permission_busy.get_untracked() {
             return;
@@ -338,7 +351,9 @@ fn Capture(
         }
         set_permission_busy.set(true);
         spawn_local(async move {
-            let _ = permission_request(PermissionCapability::ScreenRecording).await;
+            if let Err(error) = permission_request(PermissionCapability::ScreenRecording).await {
+                set_permission_message.set(Some(error));
+            }
             refresh.run(());
             set_permission_busy.set(false);
         });
@@ -346,7 +361,7 @@ fn Capture(
     view! {
         <div class="page">
             <PageHeader eyebrow="Capture" title="See only what matters." body="A bounded, privacy-filtered ScreenCaptureKit stream with explicit start and stop controls."/>
-            <div class="feature-permission-strip"><span class="status-dot" class:good=move || screen_permission.get().is_granted() aria-hidden="true"></span><span>"Screen Recording"</span><strong>{move || screen_permission.get().label()}</strong><button class="text-button" disabled=move || permission_busy.get() || screen_permission.get().is_granted() on:click=request_screen_permission>{move || if screen_permission.get().needs_settings() { "Open Settings" } else if permission_busy.get() { "Waiting…" } else { "Request access" }}</button></div>
+            <div class="feature-permission-strip"><span class="status-dot" class:good=move || screen_permission.get().is_granted() aria-hidden="true"></span><span>"Screen Recording"</span><strong aria-live="polite">{move || screen_permission.get().label()}</strong><button class="text-button" disabled=move || permission_busy.get() || screen_permission.get().is_granted() on:click=request_screen_permission>{move || if screen_permission.get().needs_settings() { "Open Settings" } else if permission_busy.get() { "Waiting…" } else { "Request access" }}</button></div>
             <div class="feature-stage">
                 <div class="stage-toolbar">
                     <span class="live-badge">{move || if capture.get().is_running() { "LIVE" } else { "OFF" }}</span>
@@ -359,7 +374,8 @@ fn Capture(
                     <span class="redaction-block">{move || if capture.get().is_running() { "Ephemeral frame" } else { "Capture off" }}</span>
                 </div>
             </div>
-            {move || message.get().map(|message| view! { <div class="boundary-callout capture-error"><span>"Capture unavailable"</span><p>{message}</p><strong>"Review permissions"</strong></div> })}
+            {move || message.get().map(|message| view! { <div class="boundary-callout capture-error" role="status" aria-live="polite"><span>"Capture unavailable"</span><p>{message}</p><strong>"Review permissions"</strong></div> })}
+            {move || permission_message.get().map(|message| view! { <div class="settings-message" role="status" aria-live="polite">{message}</div> })}
             <div class="two-column">
                 <SettingsGroup title="Sampling">
                     <div class="setting-row"><span>"State"</span><strong>{move || capture.get().state.label()}</strong></div>
@@ -385,6 +401,18 @@ fn Audio(permissions: Signal<PermissionStatuses>, refresh: Callback<()>) -> impl
         if busy.get_untracked() || microphone.get_untracked().is_granted() {
             return;
         }
+        if microphone.get_untracked().needs_settings() {
+            spawn_local(async move {
+                if let Err(error) = permission_open_settings(PermissionCapability::Microphone).await
+                {
+                    set_message.set(Some(error));
+                }
+            });
+            return;
+        }
+        if microphone.get_untracked() == PermissionState::Unsupported {
+            return;
+        }
         set_busy.set(true);
         spawn_local(async move {
             match permission_request(PermissionCapability::Microphone).await {
@@ -397,7 +425,7 @@ fn Audio(permissions: Signal<PermissionStatuses>, refresh: Callback<()>) -> impl
     view! {
         <div class="page">
             <PageHeader eyebrow="Audio" title="Ready when you hold." body="Local microphone metering and voice activity detection. No transcription, upload, or automatic recording."/>
-            <div class="audio-stage"><div class="audio-orb"><i></i><i></i><i></i></div><div><span class="micro-label">{move || if microphone.get().is_granted() { "INPUT READY" } else { "PERMISSION NEEDED" }}</span><h2>"System microphone"</h2><p>{move || format!("{} · no session active", microphone.get().label())}</p></div><button class="hold-button" disabled=move || busy.get() || !microphone.get().is_granted() on:click=request_microphone>{move || if busy.get() { "Waiting…" } else if microphone.get().is_granted() { "Hold to test" } else { "Request access" }}</button></div>
+            <div class="audio-stage"><div class="audio-orb"><i></i><i></i><i></i></div><div><span class="micro-label">{move || if microphone.get().is_granted() { "INPUT READY" } else { "PERMISSION NEEDED" }}</span><h2>"System microphone"</h2><p aria-live="polite">{move || format!("{} · no session active", microphone.get().label())}</p></div><button class="hold-button" disabled=move || busy.get() || microphone.get().is_granted() || microphone.get() == PermissionState::Unsupported on:click=request_microphone>{move || if busy.get() { "Waiting…" } else if microphone.get().is_granted() { "Input ready" } else if microphone.get().needs_settings() { "Open Settings" } else if microphone.get() == PermissionState::Unsupported { "Unavailable" } else { "Request access" }}</button></div>
             <div class="waveform" aria-label="Audio level: inactive">{(0..42).map(|index| view! { <i style=format!("height:{}%", 14 + ((index * 17) % 62))></i> }).collect_view()}</div>
             {move || message.get().map(|copy| view! { <div class="settings-message" aria-live="polite">{copy}</div> })}
             <div class="two-column"><SettingsGroup title="Input"><SettingRow label="Device" value="System default"/><SettingRow label="Analysis format" value="16 kHz mono"/></SettingsGroup><SettingsGroup title="Privacy"><SettingRow label="Ring buffer" value="3 seconds"/><SettingRow label="Audio files" value="Never automatic"/></SettingsGroup></div>
@@ -407,7 +435,7 @@ fn Audio(permissions: Signal<PermissionStatuses>, refresh: Callback<()>) -> impl
 
 #[component]
 fn Diagnostics() -> impl IntoView {
-    view! { <div class="page"><PageHeader eyebrow="Diagnostics" title="Make the invisible inspectable." body="Bounded, content-free operational data for understanding health and failures."/><div class="diagnostic-summary"><div><span class="health-ring large"><i></i></span><div><h2>"Healthy"</h2><p>"No subsystem requires attention."</p></div></div><button class="secondary-button">"Export support bundle"</button></div><div class="metric-grid"><MetricCard eyebrow="IPC p95" value="8" suffix=" ms" trend="healthy" meter=12/><MetricCard eyebrow="Dropped events" value="0" suffix="" trend="last hour" meter=0/><MetricCard eyebrow="Store p95" value="3" suffix=" ms" trend="healthy" meter=8/></div><div class="log-console"><div><span>"20:21:04"</span><strong>"capture"</strong><p>"adaptive rate settled at 0.8 fps"</p></div><div><span>"20:20:58"</span><strong>"privacy"</strong><p>"redaction rules applied (1 region)"</p></div><div><span>"20:20:55"</span><strong>"runtime"</strong><p>"all supervisors running"</p></div></div></div> }
+    view! { <div class="page"><PageHeader eyebrow="Diagnostics" title="Make the invisible inspectable." body="Bounded, content-free operational data for understanding health and failures."/><div class="diagnostic-summary"><div><span class="health-ring large"><i></i></span><div><h2>"Healthy"</h2><p>"No subsystem requires attention."</p></div></div><button class="secondary-button" disabled title="Support bundle export is not available in this build">"Export support bundle"</button></div><div class="metric-grid"><MetricCard eyebrow="IPC p95" value="8" suffix=" ms" trend="healthy" meter=12/><MetricCard eyebrow="Dropped events" value="0" suffix="" trend="last hour" meter=0/><MetricCard eyebrow="Store p95" value="3" suffix=" ms" trend="healthy" meter=8/></div><div class="log-console"><div><span>"20:21:04"</span><strong>"capture"</strong><p>"adaptive rate settled at 0.8 fps"</p></div><div><span>"20:20:58"</span><strong>"privacy"</strong><p>"redaction rules applied (1 region)"</p></div><div><span>"20:20:55"</span><strong>"runtime"</strong><p>"all supervisors running"</p></div></div></div> }
 }
 
 #[component]

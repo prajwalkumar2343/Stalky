@@ -7,7 +7,7 @@ use std::process::Command;
 
 use mega_capture::{CaptureError, CaptureService, CaptureSource, CaptureStatus};
 use mega_core::{PermissionCapability, PermissionState};
-use mega_platform_macos::MacOsPlatform;
+use mega_platform_macos::{MacOsPlatform, PlatformErrorKind};
 use permissions::{PermissionCoordinator, PermissionRequestError};
 use preferences::{AccountMode, OnboardingState, PreferenceStore};
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,10 @@ fn refresh_permission_snapshot(
     ] {
         let state = platform
             .permission_status(capability)
-            .unwrap_or(PermissionState::Unsupported);
+            .unwrap_or_else(|error| match error.kind {
+                PlatformErrorKind::Unsupported => PermissionState::Unsupported,
+                PlatformErrorKind::RequestTimeout => PermissionState::Unknown,
+            });
         coordinator.observe(capability, state);
     }
     coordinator.observe(
@@ -133,14 +136,20 @@ fn permission_open_settings(capability: PermissionSettingsTarget) -> Result<(), 
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
         }
         PermissionSettingsTarget::LaunchAtLogin => {
-            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+            return Err("Launch at login is not supported in this build.".to_owned());
         }
     };
-    Command::new("open")
+    let status = Command::new("open")
         .arg(target)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("could not open System Settings: {error}"))
+        .status()
+        .map_err(|error| format!("could not open System Settings: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not open System Settings (exit status: {status})"
+        ))
+    }
 }
 
 #[tauri::command]
@@ -162,7 +171,7 @@ async fn permission_request(
 
     let coordinator = coordinator.inner().clone();
     let accessibility = accessibility.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || match capability {
+    let result = match tauri::async_runtime::spawn_blocking(move || match capability {
         PermissionCapability::Accessibility => accessibility
             .request_permission()
             .map_err(|error| error.to_string()),
@@ -176,7 +185,13 @@ async fn permission_request(
         }
     })
     .await
-    .map_err(|error| format!("permission request task failed: {error}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            coordinator.mark_request_failed(capability);
+            return Err(format!("permission request task failed: {error}"));
+        }
+    };
 
     match result {
         Ok(state) => coordinator.finish_request(capability, state),
@@ -302,6 +317,7 @@ fn onboarding_complete(
     preferences: State<'_, PreferenceStore>,
     account_mode: AccountMode,
 ) -> Result<OnboardingState, String> {
+    validate_account_mode(account_mode)?;
     preferences.complete_onboarding(account_mode)?;
     Ok(preferences.onboarding_state())
 }
@@ -311,8 +327,16 @@ fn onboarding_set_account_mode(
     preferences: State<'_, PreferenceStore>,
     account_mode: AccountMode,
 ) -> Result<OnboardingState, String> {
+    validate_account_mode(account_mode)?;
     preferences.set_account_mode(account_mode)?;
     Ok(preferences.onboarding_state())
+}
+
+fn validate_account_mode(account_mode: AccountMode) -> Result<(), String> {
+    if account_mode == AccountMode::Google && !auth::signed_in() {
+        return Err("Complete Google sign-in before selecting the Google account mode.".to_owned());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -401,12 +425,32 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_identity;
+    use mega_core::PermissionState;
+
+    use super::{AccountMode, display_state, shell_identity, validate_account_mode};
 
     #[test]
     fn shell_identity_exposes_infrastructure_milestone() {
         let identity = shell_identity();
         assert_eq!(identity.name, "Stalky");
         assert_eq!(identity.milestone, "infrastructure");
+    }
+
+    #[test]
+    fn first_observation_of_denied_permission_is_displayed_as_not_requested() {
+        assert_eq!(
+            display_state(Some(PermissionState::Denied), false),
+            PermissionState::NotRequested
+        );
+        assert_eq!(
+            display_state(Some(PermissionState::Denied), true),
+            PermissionState::Denied
+        );
+    }
+
+    #[test]
+    fn google_account_mode_cannot_be_persisted_without_a_session() {
+        assert!(validate_account_mode(AccountMode::Local).is_ok());
+        assert!(validate_account_mode(AccountMode::Google).is_err());
     }
 }
