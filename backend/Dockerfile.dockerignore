@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+**/.env
+**/.env.*
+target
+**/target
+apps/mega-desktop/src-tauri/gen
+.DS_Store
+*.swp
+*~
