@@ -18,35 +18,53 @@ pub struct GoogleIdentity {
 
 pub fn status() -> GoogleAuthStatus {
     GoogleAuthStatus {
-        configured: client_id().is_some(),
+        configured: supabase_configuration().is_some(),
         signed_in: signed_in(),
         scopes: GOOGLE_SCOPES,
     }
 }
 
-pub fn client_id() -> Option<String> {
-    std::env::var("STALKY_GOOGLE_CLIENT_ID")
+fn configured_value(name: &str, compiled: Option<&str>) -> Option<String> {
+    std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .or_else(|| option_env!("STALKY_GOOGLE_CLIENT_ID").map(str::to_owned))
+        .or_else(|| compiled.map(str::to_owned))
 }
 
-pub fn authorization_url(
-    client_id: &str,
-    redirect_uri: &str,
-    state: &str,
-    code_challenge: &str,
-    nonce: &str,
-) -> String {
+pub fn supabase_configuration() -> Option<(String, String)> {
+    let url = configured_value("STALKY_SUPABASE_URL", option_env!("STALKY_SUPABASE_URL"))?;
+    let publishable_key = configured_value(
+        "STALKY_SUPABASE_PUBLISHABLE_KEY",
+        option_env!("STALKY_SUPABASE_PUBLISHABLE_KEY"),
+    )?;
+    if !valid_supabase_url(&url) {
+        return None;
+    }
+    Some((url.trim_end_matches('/').to_owned(), publishable_key))
+}
+
+fn valid_supabase_url(raw: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
+    let is_local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let secure_transport = parsed.scheme() == "https" || (parsed.scheme() == "http" && is_local);
+    secure_transport
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && matches!(parsed.path(), "" | "/")
+}
+
+pub fn authorization_url(supabase_url: &str, redirect_uri: &str, code_challenge: &str) -> String {
     format!(
-        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}&code_challenge={}&code_challenge_method=S256&nonce={}",
-        encode(client_id),
+        "{}/auth/v1/authorize?provider=google&redirect_to={}&scopes={}&code_challenge={}&code_challenge_method=s256",
+        supabase_url.trim_end_matches('/'),
         encode(redirect_uri),
         encode(GOOGLE_SCOPES),
-        encode(state),
         encode(code_challenge),
-        encode(nonce),
     )
 }
 
@@ -62,27 +80,28 @@ fn encode(value: &str) -> String {
         .collect()
 }
 
-fn session_is_valid(access_token: &str, expires_at: Option<u64>, now: u64) -> bool {
-    !access_token.trim().is_empty() && expires_at.is_some_and(|expires_at| expires_at > now)
+fn session_is_present(access_token: &str, refresh_token: &str) -> bool {
+    !access_token.trim().is_empty() && !refresh_token.trim().is_empty()
 }
 
 #[cfg(target_os = "macos")]
 mod native {
     use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use getrandom::fill;
-    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode as decode_jwt, decode_header};
-    use reqwest::blocking::{Client, Response};
+    use reqwest::blocking::Client;
     use security_framework::passwords::{
         delete_generic_password, get_generic_password, set_generic_password,
     };
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
 
-    use super::{GoogleIdentity, authorization_url, client_id, session_is_valid};
+    use super::{GoogleIdentity, authorization_url, session_is_present, supabase_configuration};
 
     const KEYCHAIN_SERVICE: &str = "com.stalky.desktop.google";
     const KEYCHAIN_ACCOUNT: &str = "oauth-session";
@@ -92,15 +111,32 @@ mod native {
     const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
     const OPEN_BROWSER_TIMEOUT: Duration = Duration::from_secs(10);
     const CALLBACK_PATH: &str = "/oauth2/callback";
+    static SESSION_LIFECYCLE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static SESSION_GENERATION: SessionGeneration = SessionGeneration::new();
+    static LOGIN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-    #[derive(Clone, Debug, Deserialize, serde::Serialize)]
-    struct GoogleSession {
+    #[derive(Deserialize, serde::Serialize)]
+    struct SupabaseSession {
         access_token: String,
-        refresh_token: Option<String>,
-        expires_in: Option<u64>,
+        refresh_token: String,
+        expires_in: u64,
         #[serde(default)]
         expires_at: Option<u64>,
-        token_type: Option<String>,
+        token_type: String,
+        user: SupabaseUser,
+    }
+
+    #[derive(Default, Deserialize, serde::Serialize)]
+    struct SupabaseUser {
+        email: Option<String>,
+        #[serde(default)]
+        user_metadata: UserMetadata,
+    }
+
+    #[derive(Default, Deserialize, serde::Serialize)]
+    struct UserMetadata {
+        full_name: Option<String>,
+        name: Option<String>,
     }
 
     #[derive(Debug)]
@@ -109,16 +145,88 @@ mod native {
         state: String,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RefreshFailureKind {
+        Terminal,
+        Transient,
+    }
+
+    struct RefreshError {
+        kind: RefreshFailureKind,
+    }
+
+    struct LoginAttempt;
+
+    struct SessionGeneration(AtomicU64);
+
+    impl SessionGeneration {
+        const fn new() -> Self {
+            Self(AtomicU64::new(0))
+        }
+
+        fn snapshot(&self) -> u64 {
+            self.0.load(Ordering::Acquire)
+        }
+
+        fn invalidate(&self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn is_current(&self, snapshot: u64) -> bool {
+            self.snapshot() == snapshot
+        }
+    }
+
+    impl LoginAttempt {
+        fn begin() -> Result<Self, String> {
+            LOGIN_IN_PROGRESS
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map(|_| Self)
+                .map_err(|_| "Google sign-in is already in progress.".to_owned())
+        }
+    }
+
+    impl Drop for LoginAttempt {
+        fn drop(&mut self) {
+            LOGIN_IN_PROGRESS.store(false, Ordering::Release);
+        }
+    }
+
+    fn session_lifecycle_lock() -> Result<MutexGuard<'static, ()>, String> {
+        SESSION_LIFECYCLE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "The cloud session lock is unavailable. Restart Stalky.".to_owned())
+    }
+
     pub fn has_session() -> bool {
         get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
             .ok()
-            .and_then(|encoded| serde_json::from_slice::<GoogleSession>(&encoded).ok())
+            .and_then(|encoded| serde_json::from_slice::<SupabaseSession>(&encoded).ok())
             .is_some_and(|session| {
-                session_is_valid(&session.access_token, session.expires_at, now_seconds())
+                session_is_present(&session.access_token, &session.refresh_token)
             })
     }
 
     pub fn sign_out() -> Result<(), String> {
+        let remote_session = {
+            let _guard = session_lifecycle_lock()?;
+            SESSION_GENERATION.invalidate();
+            let session = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+                .ok()
+                .and_then(|encoded| serde_json::from_slice::<SupabaseSession>(&encoded).ok());
+            delete_local_session()?;
+            supabase_configuration().zip(session)
+        };
+        if let Some(((supabase_url, publishable_key), session)) = remote_session
+            && revoke_session(&supabase_url, &publishable_key, &session.access_token).is_err()
+        {
+            eprintln!("Supabase did not confirm remote logout; the local session was removed.");
+        }
+        Ok(())
+    }
+
+    fn delete_local_session() -> Result<(), String> {
         delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
             .map_err(|error| error.to_string())
             .or_else(|error| {
@@ -130,9 +238,41 @@ mod native {
             })
     }
 
+    pub fn access_token() -> Result<String, String> {
+        let _guard = session_lifecycle_lock()?;
+        let encoded = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+            .map_err(|_| "Sign in with Google before connecting to Stalky Cloud.".to_owned())?;
+        let mut session = serde_json::from_slice::<SupabaseSession>(&encoded)
+            .map_err(|_| "The saved cloud session is invalid. Sign in again.".to_owned())?;
+        if session
+            .expires_at
+            .is_none_or(|expires_at| expires_at <= now_seconds().saturating_add(60))
+        {
+            session = match refresh_session(&session.refresh_token) {
+                Ok(session) => session,
+                Err(error) if error.kind == RefreshFailureKind::Terminal => {
+                    delete_local_session()?;
+                    return Err("Your cloud session has ended. Sign in again.".to_owned());
+                }
+                Err(_) => {
+                    return Err(
+                        "Stalky could not refresh the cloud session. Try again shortly.".to_owned(),
+                    );
+                }
+            };
+            let encoded = serde_json::to_vec(&session).map_err(|error| error.to_string())?;
+            set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &encoded).map_err(
+                |error| format!("could not update the cloud session in Keychain: {error}"),
+            )?;
+        }
+        Ok(session.access_token)
+    }
+
     pub fn run() -> Result<GoogleIdentity, String> {
-        let client_id = client_id()
-            .ok_or_else(|| "Google sign-in is not configured for this build.".to_owned())?;
+        let _login_attempt = LoginAttempt::begin()?;
+        let session_generation = SESSION_GENERATION.snapshot();
+        let (supabase_url, publishable_key) = supabase_configuration()
+            .ok_or_else(|| "Supabase sign-in is not configured for this build.".to_owned())?;
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .map_err(|error| format!("could not reserve a local OAuth callback: {error}"))?;
         let port = listener
@@ -140,22 +280,42 @@ mod native {
             .map_err(|error| format!("could not read the OAuth callback port: {error}"))?
             .port();
         let expected_host = format!("127.0.0.1:{port}");
-        let redirect_uri = format!("http://127.0.0.1:{port}/oauth2/callback");
         let state = random_urlsafe(32)?;
+        let redirect_uri = format!(
+            "http://127.0.0.1:{port}/oauth2/callback?state={}",
+            super::encode(&state)
+        );
         let verifier = random_urlsafe(64)?;
-        let nonce = random_urlsafe(32)?;
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let url = authorization_url(&client_id, &redirect_uri, &state, &challenge, &nonce);
+        let url = authorization_url(&supabase_url, &redirect_uri, &challenge);
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("could not prepare the OAuth callback listener: {error}"))?;
         open_browser(&url)?;
         let callback = wait_for_callback(listener, &state, &expected_host)?;
-        let session = exchange_code(&client_id, &callback.code, &verifier, &redirect_uri, &nonce)?;
-        let identity = fetch_identity(&session.access_token)?;
+        let session = exchange_code(&supabase_url, &publishable_key, &callback.code, &verifier)?;
+        let identity = GoogleIdentity {
+            email: session.user.email.clone(),
+            name: session
+                .user
+                .user_metadata
+                .full_name
+                .clone()
+                .or_else(|| session.user.user_metadata.name.clone()),
+        };
         let encoded = serde_json::to_vec(&session).map_err(|error| error.to_string())?;
-        set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &encoded)
-            .map_err(|error| format!("could not store the Google session in Keychain: {error}"))?;
+        let guard = session_lifecycle_lock()?;
+        let cancelled = !SESSION_GENERATION.is_current(session_generation);
+        if !cancelled {
+            set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &encoded).map_err(
+                |error| format!("could not store the Google session in Keychain: {error}"),
+            )?;
+        }
+        drop(guard);
+        if cancelled {
+            let _ = revoke_session(&supabase_url, &publishable_key, &session.access_token);
+            return Err("Google sign-in was cancelled.".to_owned());
+        }
         Ok(identity)
     }
 
@@ -356,75 +516,98 @@ mod native {
         String::from_utf8(output).map_err(|_| "OAuth callback was not valid UTF-8.".to_owned())
     }
 
-    #[derive(Debug, Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: Option<u64>,
-        token_type: Option<String>,
-        id_token: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct IdTokenClaims {
-        nonce: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct GoogleJwkSet {
-        keys: Vec<GoogleJwk>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct GoogleJwk {
-        kty: String,
-        kid: String,
-        n: String,
-        e: String,
-        alg: Option<String>,
-    }
-
     fn exchange_code(
-        client_id: &str,
+        supabase_url: &str,
+        publishable_key: &str,
         code: &str,
         verifier: &str,
-        redirect_uri: &str,
-        nonce: &str,
-    ) -> Result<GoogleSession, String> {
-        let client = oauth_client()?;
-        let response = client
-            .post("https://oauth2.googleapis.com/token")
-            .form(&[
-                ("code", code),
-                ("client_id", client_id),
-                ("redirect_uri", redirect_uri),
-                ("grant_type", "authorization_code"),
-                ("code_verifier", verifier),
-            ])
+    ) -> Result<SupabaseSession, String> {
+        let response = auth_client()?
+            .post(format!("{supabase_url}/auth/v1/token?grant_type=pkce"))
+            .header("apikey", publishable_key)
+            .json(&serde_json::json!({
+                "auth_code": code,
+                "code_verifier": verifier,
+            }))
             .send()
-            .map_err(|error| format!("Google token exchange failed: {error}"))?;
+            .map_err(|error| format!("Supabase session exchange failed: {error}"))?;
         if !response.status().is_success() {
             return Err(format!(
-                "Google token exchange was rejected ({})",
+                "Supabase session exchange was rejected ({})",
                 response.status()
             ));
         }
-        let token = response
-            .json::<TokenResponse>()
-            .map_err(|error| format!("Google returned an invalid token response: {error}"))?;
-        if token.access_token.trim().is_empty() || token.id_token.trim().is_empty() {
-            return Err("Google returned an incomplete token response.".to_owned());
+        let mut session = response
+            .json::<SupabaseSession>()
+            .map_err(|error| format!("Supabase returned an invalid session: {error}"))?;
+        if !session_is_present(&session.access_token, &session.refresh_token)
+            || !session.token_type.eq_ignore_ascii_case("bearer")
+        {
+            return Err("Supabase returned an incomplete session.".to_owned());
         }
-        validate_id_token(&client, &token.id_token, client_id, nonce)?;
-        Ok(GoogleSession {
-            access_token: token.access_token,
-            refresh_token: token.refresh_token,
-            expires_in: token.expires_in,
-            expires_at: token
-                .expires_in
-                .map(|expires_in| now_seconds().saturating_add(expires_in)),
-            token_type: token.token_type,
-        })
+        session.expires_at = Some(now_seconds().saturating_add(session.expires_in));
+        Ok(session)
+    }
+
+    fn refresh_session(refresh_token: &str) -> Result<SupabaseSession, RefreshError> {
+        let (supabase_url, publishable_key) = supabase_configuration().ok_or(RefreshError {
+            kind: RefreshFailureKind::Terminal,
+        })?;
+        let response = auth_client()
+            .map_err(|_| RefreshError {
+                kind: RefreshFailureKind::Transient,
+            })?
+            .post(format!(
+                "{supabase_url}/auth/v1/token?grant_type=refresh_token"
+            ))
+            .header("apikey", publishable_key)
+            .json(&serde_json::json!({ "refresh_token": refresh_token }))
+            .send()
+            .map_err(|_| RefreshError {
+                kind: RefreshFailureKind::Transient,
+            })?;
+        if !response.status().is_success() {
+            return Err(RefreshError {
+                kind: classify_refresh_status(response.status()),
+            });
+        }
+        let mut session = response
+            .json::<SupabaseSession>()
+            .map_err(|_| RefreshError {
+                kind: RefreshFailureKind::Transient,
+            })?;
+        if !session_is_present(&session.access_token, &session.refresh_token)
+            || !session.token_type.eq_ignore_ascii_case("bearer")
+        {
+            return Err(RefreshError {
+                kind: RefreshFailureKind::Transient,
+            });
+        }
+        session.expires_at = Some(now_seconds().saturating_add(session.expires_in));
+        Ok(session)
+    }
+
+    fn classify_refresh_status(status: reqwest::StatusCode) -> RefreshFailureKind {
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            RefreshFailureKind::Transient
+        } else {
+            RefreshFailureKind::Terminal
+        }
+    }
+
+    fn revoke_session(
+        supabase_url: &str,
+        publishable_key: &str,
+        access_token: &str,
+    ) -> Result<(), String> {
+        auth_client()?
+            .post(format!("{supabase_url}/auth/v1/logout?scope=local"))
+            .header("apikey", publishable_key)
+            .bearer_auth(access_token)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map(|_| ())
+            .map_err(|_| "Supabase did not confirm remote logout.".to_owned())
     }
 
     fn now_seconds() -> u64 {
@@ -433,91 +616,55 @@ mod native {
             .map_or(0, |duration| duration.as_secs())
     }
 
-    fn oauth_client() -> Result<Client, String> {
+    fn auth_client() -> Result<Client, String> {
         Client::builder()
             .timeout(NETWORK_TIMEOUT)
             .build()
-            .map_err(|error| format!("could not prepare the Google network client: {error}"))
+            .map_err(|error| format!("could not prepare the Supabase network client: {error}"))
     }
 
-    fn validate_id_token(
-        client: &Client,
-        id_token: &str,
-        client_id: &str,
-        expected_nonce: &str,
-    ) -> Result<(), String> {
-        let header = decode_header(id_token)
-            .map_err(|error| format!("Google returned an invalid identity token: {error}"))?;
-        if header.alg != Algorithm::RS256 {
-            return Err(
-                "Google returned an identity token with an unsupported algorithm.".to_owned(),
-            );
-        }
-        let key_id = header
-            .kid
-            .ok_or_else(|| "Google returned an identity token without a key id.".to_owned())?;
-        let response = client
-            .get("https://www.googleapis.com/oauth2/v3/certs")
-            .send()
-            .map_err(|error| format!("Google identity keys could not be loaded: {error}"))?;
-        let keys = ensure_success(response, "Google identity keys")?
-            .json::<GoogleJwkSet>()
-            .map_err(|error| format!("Google returned invalid identity keys: {error}"))?;
-        let jwk = keys
-            .keys
-            .into_iter()
-            .find(|key| {
-                key.kid == key_id
-                    && key.kty == "RSA"
-                    && key
-                        .alg
-                        .as_deref()
-                        .is_none_or(|algorithm| algorithm == "RS256")
-            })
-            .ok_or_else(|| "Google returned no matching identity key.".to_owned())?;
-        let key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
-            .map_err(|error| format!("Google identity key was invalid: {error}"))?;
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[client_id]);
-        validation.set_issuer(&["https://accounts.google.com", "accounts.google.com"]);
-        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-        let claims = decode_jwt::<IdTokenClaims>(id_token, &key, &validation)
-            .map_err(|error| format!("Google identity token validation failed: {error}"))?
-            .claims;
-        if claims.nonce != expected_nonce {
-            return Err(
-                "Google identity token nonce did not match the sign-in request.".to_owned(),
-            );
-        }
-        Ok(())
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::{RefreshFailureKind, SessionGeneration, classify_refresh_status};
+        use reqwest::StatusCode;
 
-    fn ensure_success(response: Response, service: &str) -> Result<Response, String> {
-        if response.status().is_success() {
-            Ok(response)
-        } else {
-            Err(format!(
-                "{service} request was rejected ({})",
-                response.status()
-            ))
+        #[test]
+        fn terminal_refresh_rejections_require_new_sign_in() {
+            for status in [
+                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+            ] {
+                assert_eq!(
+                    classify_refresh_status(status),
+                    RefreshFailureKind::Terminal
+                );
+            }
         }
-    }
 
-    fn fetch_identity(access_token: &str) -> Result<GoogleIdentity, String> {
-        let response = oauth_client()?
-            .get("https://openidconnect.googleapis.com/v1/userinfo")
-            .bearer_auth(access_token)
-            .send()
-            .map_err(|error| format!("Google identity lookup failed: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Google identity lookup was rejected ({})",
-                response.status()
-            ));
+        #[test]
+        fn transient_refresh_failures_preserve_the_rotating_session() {
+            for status in [
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ] {
+                assert_eq!(
+                    classify_refresh_status(status),
+                    RefreshFailureKind::Transient
+                );
+            }
         }
-        response
-            .json::<GoogleIdentity>()
-            .map_err(|error| format!("Google returned an invalid identity response: {error}"))
+
+        #[test]
+        fn logout_invalidation_prevents_inflight_login_persistence() {
+            let generation = SessionGeneration::new();
+            let login_snapshot = generation.snapshot();
+
+            generation.invalidate();
+
+            assert!(!generation.is_current(login_snapshot));
+        }
     }
 }
 
@@ -548,33 +695,46 @@ pub fn run() -> Result<GoogleIdentity, String> {
     Err("Google sign-in is only available in the macOS desktop app.".to_owned())
 }
 
+pub fn access_token() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        native::access_token()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("Stalky Cloud authentication is only available in the macOS desktop app.".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GOOGLE_SCOPES, authorization_url, session_is_valid};
+    use super::{GOOGLE_SCOPES, authorization_url, session_is_present, valid_supabase_url};
 
     #[test]
     fn authorization_url_uses_pkce_and_minimal_scopes() {
         let url = authorization_url(
-            "client.apps.googleusercontent.com",
+            "https://project.supabase.co",
             "http://127.0.0.1:4321/oauth2/callback",
-            "state-value",
             "challenge-value",
-            "nonce-value",
         );
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("scope=openid%20email%20profile"));
-        assert!(url.contains("nonce=nonce-value"));
+        assert!(url.contains("/auth/v1/authorize?provider=google"));
+        assert!(url.contains("code_challenge_method=s256"));
+        assert!(url.contains("scopes=openid%20email%20profile"));
         assert_eq!(GOOGLE_SCOPES, "openid email profile");
         assert!(!url.contains("client_secret"));
     }
 
     #[test]
-    fn expired_google_sessions_are_not_treated_as_signed_in() {
-        assert!(!session_is_valid("access-token", Some(1_000), 1_000));
-        assert!(!session_is_valid("access-token", Some(999), 1_000));
-        assert!(session_is_valid("access-token", Some(1_001), 1_000));
-        assert!(!session_is_valid("", Some(1_001), 1_000));
-        assert!(!session_is_valid("access-token", None, 1_000));
+    fn supabase_session_requires_both_credentials() {
+        assert!(session_is_present("access-token", "refresh-token"));
+        assert!(!session_is_present("", "refresh-token"));
+        assert!(!session_is_present("access-token", ""));
+    }
+
+    #[test]
+    fn supabase_configuration_requires_a_secure_base_url() {
+        assert!(valid_supabase_url("https://project.supabase.co"));
+        assert!(valid_supabase_url("http://127.0.0.1:54321"));
+        assert!(!valid_supabase_url("http://project.supabase.co"));
+        assert!(!valid_supabase_url("https://project.supabase.co/other"));
+        assert!(!valid_supabase_url("https://user@project.supabase.co"));
     }
 }
