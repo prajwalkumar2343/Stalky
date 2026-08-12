@@ -1,0 +1,345 @@
+openapi: 3.1.0
+info:
+  title: Stalky Backend API
+  version: 0.1.0
+  summary: Authenticated identity API for the Stalky desktop app.
+  description: |
+    Minimal authenticated surface of the Stalky backend. It exposes liveness and
+    readiness probes plus an authenticated identity endpoint, `GET /v1/me`.
+
+    Authentication is a Supabase-issued JWT sent as `Authorization: Bearer <token>`.
+    The backend validates ES256 or RS256 tokens against the Supabase project's
+    JWKS endpoint and returns only the verified caller claims needed by clients.
+
+    Faults are returned as `application/problem+json` bodies that follow RFC 9457
+    plus the Stalky extension members `code`, `retryable`, and `requestId`.
+
+    This contract intentionally contains no mutation endpoints. Upload/sync,
+    remote transcription, and agent/automation APIs are out of scope and are not
+    described here until a later, separately approved unit.
+  contact:
+    name: Stalky maintainers
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.stalky.app
+    description: Production
+  - url: http://127.0.0.1:8080
+    description: Local development
+
+tags:
+  - name: Health
+    description: Liveness and readiness probes used by load balancers and orchestrators.
+  - name: Identity
+    description: Authenticated caller identity operations.
+
+paths:
+  /health/live:
+    get:
+      operationId: getHealthLive
+      summary: Liveness probe
+      description: |
+        Returns HTTP 200 when the process is up. It does not check downstream
+        dependencies; use `/health/ready` for that.
+      tags: [Health]
+      responses:
+        "200":
+          description: The service process is alive.
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                service: stalky-backend
+                version: "0.1.0"
+                status: ok
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /health/ready:
+    get:
+      operationId: getHealthReady
+      summary: Readiness probe
+      description: |
+        Returns HTTP 200 when the service is ready to accept requests, including
+        that required configuration is present. Fails closed (5xx) if not ready.
+      tags: [Health]
+      responses:
+        "200":
+          description: The service is ready to serve traffic.
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                service: stalky-backend
+                version: "0.1.0"
+                status: ok
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /v1/me:
+    get:
+      operationId: getMe
+      summary: Authenticated caller identity
+      description: |
+        Returns a minimal projection of verified Supabase access-token claims.
+        This endpoint does not query a profile database or expose provider tokens.
+      tags: [Identity]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The authenticated caller's verified identity.
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+              example:
+                userId: 00000000-0000-4000-8000-000000000000
+                role: authenticated
+                aal: aal1
+                sessionId: 11111111-1111-4111-8111-111111111111
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/RouteNotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A Supabase-issued JWT (ES256 or RS256) signed by the project's asymmetric
+        signing key. The backend fetches public keys from the JWKS endpoint at
+        `https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json` and
+        validates `exp`, `iss`, `aud`, and `sub` before authorizing.
+
+  parameters:
+    RequestId:
+      name: x-request-id
+      in: header
+      required: false
+      description: |
+        Optional client-supplied correlation id. The server echoes it back on the
+        response or generates a UUID when absent so clients can correlate logs.
+      schema:
+        type: string
+        format: uuid
+
+  headers:
+    RequestId:
+      description: Correlation id for this request, echoed or generated by the server.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: The Bearer token is missing, expired, malformed, or its signature was rejected.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://api.stalky.app/problems/auth.unauthorized
+            status: 401
+            code: auth.unauthorized
+            title: Unauthorized
+            detail: Valid credentials are required to access this resource.
+            retryable: false
+            requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+    RouteNotFound:
+      description: The requested API route does not exist.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://api.stalky.app/problems/route.not_found
+            status: 404
+            code: route.not_found
+            title: Route not found
+            detail: The requested API route does not exist.
+            retryable: false
+            requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+    PayloadTooLarge:
+      description: The request body exceeded the enforced 1 MiB limit.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://api.stalky.app/problems/request.too_large
+            status: 413
+            code: request.too_large
+            title: Payload too large
+            detail: The request body exceeds the 1 MiB limit.
+            retryable: false
+            requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+    RateLimited:
+      description: The client exceeded the request rate limit and should retry later.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://api.stalky.app/problems/rate.limited
+            status: 429
+            code: rate.limited
+            title: Rate limited
+            detail: Too many requests. Please retry after the suggested delay.
+            retryable: true
+            requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+    InternalError:
+      description: An unexpected server error occurred. The request may be retried.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://api.stalky.app/problems/server.internal
+            status: 500
+            code: server.internal
+            title: Internal server error
+            detail: An unexpected error occurred on the server.
+            retryable: true
+            requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+    GatewayTimeout:
+      description: The request exceeded the server timeout and may be retried.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://api.stalky.app/problems/server.timeout
+            status: 504
+            code: server.timeout
+            title: Gateway timeout
+            detail: The request did not complete before the server timeout.
+            retryable: true
+            requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+  schemas:
+    Health:
+      type: object
+      description: Minimal health payload returned by the probes.
+      required: [service, version, status]
+      properties:
+        service:
+          type: string
+          const: stalky-backend
+        version:
+          type: string
+          description: Package version from the Cargo build.
+        status:
+          type: string
+          const: ok
+
+    Me:
+      type: object
+      description: Minimal verified identity served by `GET /v1/me`.
+      required: [userId, role]
+      properties:
+        userId:
+          type: string
+          format: uuid
+          description: The verified Supabase `sub` claim.
+        role:
+          type: string
+          const: authenticated
+        aal:
+          type: [string, "null"]
+          description: Supabase authenticator assurance level when present.
+        sessionId:
+          type: [string, "null"]
+          format: uuid
+          description: Supabase session identifier when present.
+
+    Problem:
+      type: object
+      description: |
+        RFC 9457 problem detail plus Stalky extension members `code`, `retryable`,
+        and `requestId`. `type` is a URI identifying the problem type; the body
+        is emitted with media type `application/problem+json`.
+      required: [type, status, title, detail, code, retryable]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type, e.g. https://api.stalky.app/problems/<code>.
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code generated by the origin.
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        code:
+          type: string
+          description: Stable machine-readable code used by clients for programmatic handling.
+        retryable:
+          type: boolean
+          description: True when retrying the same request may succeed.
+        requestId:
+          type: string
+          description: Correlation id echoed or generated for this request, when available.
