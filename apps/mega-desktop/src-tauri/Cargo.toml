@@ -15,18 +15,21 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 mega-core.workspace = true
 mega-capture.workspace = true
+mega-ipc.workspace = true
+mega-memory.workspace = true
 mega-platform-macos.workspace = true
 mega-permissions.workspace = true
+mega-store.workspace = true
 stalky-accessibility.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 base64 = "0.22"
 getrandom = "0.3"
-jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 security-framework = "3.2"
 sha2 = "0.10"
