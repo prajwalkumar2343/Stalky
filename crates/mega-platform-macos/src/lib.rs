@@ -82,6 +82,18 @@ impl MacOsPlatform {
         self.permission_status(PermissionCapability::Accessibility)
     }
 
+    /// Reads live Accessibility trust via an active event-tap probe.
+    ///
+    /// `AXIsProcessTrusted` caches its answer in-process, so a grant made in
+    /// System Settings while the app is running stays invisible until a
+    /// relaunch. This probe asks tccd at call time and catches that
+    /// transition. It enrolls the app in the Accessibility pane and can
+    /// surface the system prompt, so it must only be used while the user is
+    /// actively being asked for the permission.
+    pub fn accessibility_permission_status_live(&self) -> Result<PermissionState, PlatformError> {
+        Ok(platform::accessibility_permission_status_live())
+    }
+
     /// Reads Screen Recording access using CoreGraphics preflight.
     pub fn screen_recording_permission_status(&self) -> Result<PermissionState, PlatformError> {
         self.permission_status(PermissionCapability::ScreenRecording)
