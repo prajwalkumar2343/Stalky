@@ -1,4 +1,7 @@
 mod auth;
+mod cloud;
+mod hud;
+mod memory;
 mod permissions;
 mod preferences;
 
@@ -16,6 +19,8 @@ use stalky_accessibility::{
     AccessibilityActionRequest, AccessibilityError, AccessibilityService, AccessibilityStatus,
 };
 use tauri::{Manager, State, WindowEvent};
+
+use hud::HudWindowState;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,11 +71,18 @@ impl From<PermissionSettingsTarget> for PermissionCapability {
 
 /// Reads fresh OS truth and updates the in-memory coordinator. No native
 /// request method is called here, including when the window regains focus.
+///
+/// `live` switches the Accessibility probe to the active event-tap check,
+/// which sees grants made in System Settings while the app is running
+/// (`AXIsProcessTrusted` caches its answer in-process). The live probe can
+/// surface the system prompt and enroll the app in the Accessibility pane, so
+/// it must only be used while the user is actively granting that permission.
 fn refresh_permission_snapshot(
     coordinator: &PermissionCoordinator,
     preferences: &PreferenceStore,
     capture: &CaptureService,
     accessibility: &AccessibilityService,
+    live: bool,
 ) -> PermissionStatuses {
     let platform = MacOsPlatform::new();
     for capability in [
@@ -85,6 +97,9 @@ fn refresh_permission_snapshot(
                 PlatformErrorKind::RequestTimeout => PermissionState::Unknown,
             });
         coordinator.observe(capability, state);
+    }
+    if live && let Ok(live_state) = platform.accessibility_permission_status_live() {
+        coordinator.observe(PermissionCapability::Accessibility, live_state);
     }
     coordinator.observe(
         PermissionCapability::LaunchAtLogin,
@@ -153,12 +168,36 @@ fn permission_statuses(
         preferences.inner(),
         capture.inner(),
         accessibility.inner(),
+        false,
+    )
+}
+
+/// Live variant used by onboarding after the user starts granting. The
+/// Accessibility probe switches to the active event-tap check so a grant made
+/// in System Settings is seen without relaunching Stalky.
+#[tauri::command]
+fn permission_statuses_live(
+    coordinator: State<'_, PermissionCoordinator>,
+    preferences: State<'_, PreferenceStore>,
+    capture: State<'_, CaptureService>,
+    accessibility: State<'_, AccessibilityService>,
+) -> PermissionStatuses {
+    refresh_permission_snapshot(
+        coordinator.inner(),
+        preferences.inner(),
+        capture.inner(),
+        accessibility.inner(),
+        true,
     )
 }
 
 #[tauri::command]
 fn permission_open_settings(capability: PermissionSettingsTarget) -> Result<(), String> {
-    let target = match capability {
+    open_settings_pane(capability)
+}
+
+fn open_settings_pane(target: PermissionSettingsTarget) -> Result<(), String> {
+    let target = match target {
         PermissionSettingsTarget::Accessibility => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         }
@@ -210,10 +249,17 @@ async fn permission_request(
         PermissionCapability::Accessibility => accessibility_for_request
             .request_permission()
             .map_err(|error| error.to_string()),
-        PermissionCapability::ScreenRecording | PermissionCapability::Microphone => {
+        PermissionCapability::ScreenRecording => {
+            // Open System Settings first so it sits behind the native modal.
+            // On macOS 15+ the modal layers over Settings; if the user
+            // dismisses it, Settings is already open and they are not stuck.
+            open_settings_pane(PermissionSettingsTarget::ScreenRecording)?;
             MacOsPlatform::new()
                 .request_permission(capability)
                 .map_err(|error| error.to_string())
+        }
+        PermissionCapability::Microphone => {
+            request_microphone_permission().map_err(|error| error.to_string())
         }
         PermissionCapability::LaunchAtLogin => {
             Err("Launch at login is optional and not available in this build.".to_owned())
@@ -239,6 +285,7 @@ async fn permission_request(
         preferences.inner(),
         capture.inner(),
         &accessibility,
+        false,
     ))
 }
 
@@ -269,6 +316,27 @@ fn format_permission_error(capability: PermissionCapability, error: String) -> S
         PermissionCapability::Microphone => format!("Microphone request failed: {error}"),
         PermissionCapability::LaunchAtLogin => error,
     }
+}
+
+/// Requests Microphone access only when macOS still allows a prompt.
+///
+/// A first-time request shows the native consent sheet. After a denial macOS
+/// never re-prompts, so the request routes the user to the Microphone pane in
+/// System Settings instead of invoking a no-op prompt.
+fn request_microphone_permission() -> Result<PermissionState, mega_platform_macos::PlatformError> {
+    let platform = MacOsPlatform::new();
+    let current = platform.permission_status(PermissionCapability::Microphone)?;
+    if current.is_granted() {
+        return Ok(current);
+    }
+    if matches!(
+        current,
+        PermissionState::Denied | PermissionState::Restricted | PermissionState::Revoked
+    ) {
+        let _ = open_settings_pane(PermissionSettingsTarget::Microphone);
+        return Ok(current);
+    }
+    platform.request_permission(PermissionCapability::Microphone)
 }
 
 #[tauri::command]
@@ -349,6 +417,14 @@ fn onboarding_state(preferences: State<'_, PreferenceStore>) -> OnboardingState 
     preferences.onboarding_state()
 }
 
+/// Relaunches Stalky. Screen Recording grants made in the TCC sheet can take
+/// effect only after the process restarts; this is the explicit, user-confirmed
+/// action that performs it.
+#[tauri::command]
+fn relaunch_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[tauri::command]
 fn onboarding_complete(
     preferences: State<'_, PreferenceStore>,
@@ -393,7 +469,7 @@ async fn google_auth_start(
     preferences: State<'_, PreferenceStore>,
 ) -> Result<auth::GoogleAuthStatus, String> {
     if !auth::status().configured {
-        return Err("Google sign-in is not configured for this build. Set STALKY_GOOGLE_CLIENT_ID and restart Stalky.".to_owned());
+        return Err("Google sign-in is not configured for this build. Set STALKY_SUPABASE_URL and STALKY_SUPABASE_PUBLISHABLE_KEY, then restart Stalky.".to_owned());
     }
     tauri::async_runtime::spawn_blocking(auth::run)
         .await
@@ -411,6 +487,13 @@ fn google_auth_sign_out(
     Ok(auth::status())
 }
 
+#[tauri::command]
+async fn cloud_profile() -> Result<cloud::CloudProfile, String> {
+    tauri::async_runtime::spawn_blocking(cloud::profile)
+        .await
+        .map_err(|error| format!("Stalky Cloud task failed: {error}"))?
+}
+
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
@@ -423,13 +506,38 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let path = preferences_path(app.handle()).map_err(std::io::Error::other)?;
-            app.manage(PreferenceStore::new(path));
+            let preferences = PreferenceStore::new(path);
+            let hud_state = HudWindowState::new(preferences.hud_anchor());
+            if let Err(error) = hud::prepare_window(app.handle(), &hud_state) {
+                eprintln!("Stalky glance is unavailable: {error}");
+            }
+            app.manage(hud_state);
+            app.manage(preferences);
             app.manage(PermissionCoordinator::new());
+            app.manage(memory::MemoryService::initialize(app.handle()));
             Ok(())
         })
         .manage(CaptureService::new())
         .manage(AccessibilityService::new())
         .on_window_event(|window, event| {
+            if window.label() == "hud" {
+                let state = window.state::<HudWindowState>();
+                if matches!(event, WindowEvent::Moved(_)) {
+                    hud::observe_window_position(window, state.inner());
+                }
+                if matches!(event, WindowEvent::Focused(false) | WindowEvent::Destroyed) {
+                    let preferences = window.state::<PreferenceStore>();
+                    hud::persist_window_position(preferences.inner(), state.inner());
+                }
+            }
+            if window.label() == "main"
+                && let WindowEvent::CloseRequested { api, .. } = event
+                && window.get_webview_window("hud").is_some()
+            {
+                api.prevent_close();
+                let _ = window.hide();
+                return;
+            }
             if matches!(event, WindowEvent::Focused(true)) {
                 let coordinator = window.state::<PermissionCoordinator>();
                 let preferences = window.state::<PreferenceStore>();
@@ -440,14 +548,17 @@ pub fn run() {
                     preferences.inner(),
                     capture.inner(),
                     accessibility.inner(),
+                    false,
                 );
             }
         })
         .invoke_handler(tauri::generate_handler![
             shell_identity,
             permission_statuses,
+            permission_statuses_live,
             permission_request,
             permission_open_settings,
+            relaunch_app,
             capture_start,
             capture_stop,
             capture_status,
@@ -461,7 +572,17 @@ pub fn run() {
             onboarding_reset,
             google_auth_status,
             google_auth_start,
-            google_auth_sign_out
+            google_auth_sign_out,
+            cloud_profile,
+            memory::memory_create_manual,
+            memory::memory_search,
+            memory::memory_edit,
+            memory::memory_confirm,
+            memory::memory_reject,
+            memory::memory_context,
+            memory::memory_delete,
+            hud::hud_set_presentation,
+            hud::hud_open_main
         ])
         .run(tauri::generate_context!())
         .expect("Stalky desktop runtime failed");
