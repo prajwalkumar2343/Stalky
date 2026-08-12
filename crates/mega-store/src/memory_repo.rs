@@ -623,7 +623,7 @@ impl MemoryStore {
             "SELECT source_event_id FROM memory_sources WHERE memory_id=?1",
             memory_id.as_str(),
         )?;
-        tx.execute("DELETE FROM memory_profiles", [])?;
+        invalidate_affected_profiles(&tx, memory_id.as_str())?;
         tx.execute("DELETE FROM memories WHERE id = ?1", [memory_id.as_str()])?;
         for source_id in source_ids {
             tx.execute(
@@ -1205,9 +1205,59 @@ fn remove_rebuildable_projections(
         "DELETE FROM memory_embeddings WHERE memory_id=?1",
         [memory_id],
     )?;
-    tx.execute("DELETE FROM memory_profiles", [])?;
+    invalidate_affected_profiles(tx, memory_id)?;
     tx.execute(
         "DELETE FROM projection_jobs WHERE projection_key=?1",
+        [memory_id],
+    )?;
+    Ok(())
+}
+
+fn invalidate_affected_profiles(
+    tx: &rusqlite::Transaction<'_>,
+    memory_id: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM memory_profiles
+         WHERE (projection_type='global' AND EXISTS (
+                    SELECT 1 FROM memories m
+                    JOIN memory_scopes s ON s.id=m.scope_id
+                    WHERE m.id=?1 AND s.scope_type='global'
+                ))
+            OR (projection_type='app' AND (
+                    EXISTS (
+                        SELECT 1 FROM memories m
+                        JOIN memory_scopes s ON s.id=m.scope_id
+                        WHERE m.id=?1 AND s.scope_type='app'
+                          AND s.scope_key=memory_profiles.projection_key
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM memory_apps ma
+                        WHERE ma.memory_id=?1 AND ma.role='applies_to'
+                          AND ma.app_id=memory_profiles.projection_key
+                    )
+                ))
+            OR (projection_type='project' AND EXISTS (
+                    SELECT 1 FROM memories m
+                    JOIN memory_scopes s ON s.id=m.scope_id
+                    WHERE m.id=?1 AND s.scope_type='project'
+                      AND s.scope_key=memory_profiles.projection_key
+                ))
+            OR (projection_type='category' AND EXISTS (
+                    SELECT 1 FROM memory_categories mc
+                    JOIN categories c ON c.id=mc.category_id
+                    WHERE mc.memory_id=?1
+                      AND (c.slug=memory_profiles.projection_key
+                           OR (length(c.slug)>length(memory_profiles.projection_key)
+                               AND substr(c.slug, 1, length(memory_profiles.projection_key))=
+                                   memory_profiles.projection_key
+                               AND substr(c.slug, length(memory_profiles.projection_key)+1, 1)='.'))
+                ))
+            OR (projection_type='entity' AND EXISTS (
+                    SELECT 1 FROM memory_entities me
+                    WHERE me.memory_id=?1
+                      AND me.entity_id=memory_profiles.projection_key
+                ))",
         [memory_id],
     )?;
     Ok(())
@@ -1569,8 +1619,9 @@ const TAXONOMY: &[(&str, Option<&str>, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SourceEventInput, SourceKind};
+    use crate::{ProfileRecord, ProfileType, SourceEventInput, SourceKind};
     use mega_memory::{CandidateScope, ExtractionRunId};
+    use serde_json::json;
 
     fn manual(content: &str, now_ms: i64) -> ManualMemoryInput {
         ManualMemoryInput {
@@ -1586,6 +1637,17 @@ mod tests {
             valid_from_ms: None,
             valid_until_ms: None,
             now_ms,
+        }
+    }
+
+    fn profile(profile_type: ProfileType, key: &str) -> ProfileRecord {
+        ProfileRecord {
+            profile_type,
+            key: key.into(),
+            stable: json!([key]),
+            current: json!([]),
+            source_revision: 1,
+            generated_at: 10,
         }
     }
 
@@ -1786,6 +1848,100 @@ mod tests {
             .unwrap();
         assert_eq!(tombstones, 1);
         store.integrity_check().unwrap();
+    }
+
+    #[test]
+    fn forgetting_invalidates_only_profiles_affected_by_the_memory() {
+        let mut store = MemoryStore::in_memory().unwrap();
+        let memory = store
+            .create_manual(
+                &manual("User dislikes mushrooms on pizza.", 10),
+                "manual-create",
+            )
+            .unwrap();
+        for (profile_type, key) in [
+            (ProfileType::Global, "global"),
+            (ProfileType::Category, "choices.food"),
+            (ProfileType::Category, "choices.design"),
+            (ProfileType::Category, "choices.%"),
+        ] {
+            store
+                .put_profile(&profile(profile_type, key), "profile-create")
+                .unwrap();
+        }
+
+        store
+            .delete_memory(
+                &memory.id,
+                memory.revision,
+                DeleteMode::Forget,
+                "forget-memory",
+                20,
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .get_profile(ProfileType::Global, "global")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_profile(ProfileType::Category, "choices.food")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_profile(ProfileType::Category, "choices.design")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .get_profile(ProfileType::Category, "choices.%")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn permanent_delete_preserves_unrelated_profiles() {
+        let mut store = MemoryStore::in_memory().unwrap();
+        let mut input = manual("Stalky uses encrypted SQLite memory.", 10);
+        input.scope_type = ScopeType::Project;
+        input.scope_key = "stalky".into();
+        input.scope_display_name = "Stalky".into();
+        let memory = store.create_manual(&input, "manual-create").unwrap();
+        for key in ["stalky", "unrelated-project"] {
+            store
+                .put_profile(&profile(ProfileType::Project, key), "profile-create")
+                .unwrap();
+        }
+
+        store
+            .delete_memory(
+                &memory.id,
+                memory.revision,
+                DeleteMode::Permanent,
+                "delete-memory",
+                20,
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .get_profile(ProfileType::Project, "stalky")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_profile(ProfileType::Project, "unrelated-project")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
