@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Narrow capabilities for the local Stalky shell.",
-  "windows": ["main"],
+  "description": "Narrow capabilities for the local Stalky shell and glance HUD.",
+  "windows": ["main", "hud"],
   "platforms": ["macOS"],
   "permissions": [
     "core:window:allow-start-dragging",
