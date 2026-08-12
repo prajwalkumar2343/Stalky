@@ -2,12 +2,15 @@
 members = [
     "apps/mega-desktop/src-tauri",
     "apps/mega-desktop/ui",
+    "backend",
     "crates/mega-core",
     "crates/mega-capture",
     "crates/mega-ipc",
+    "crates/mega-memory",
     "crates/mega-platform-macos",
     "crates/mega-permissions",
     "crates/mega-runtime",
+    "crates/mega-store",
     "crates/mega-test-support",
     "crates/stalky-accessibility",
 ]
@@ -22,9 +25,11 @@ publish = false
 mega-core = { path = "crates/mega-core" }
 mega-capture = { path = "crates/mega-capture" }
 mega-ipc = { path = "crates/mega-ipc" }
+mega-memory = { path = "crates/mega-memory" }
 mega-platform-macos = { path = "crates/mega-platform-macos" }
 mega-permissions = { path = "crates/mega-permissions" }
 mega-runtime = { path = "crates/mega-runtime" }
+mega-store = { path = "crates/mega-store" }
 mega-test-support = { path = "crates/mega-test-support" }
 stalky-accessibility = { path = "crates/stalky-accessibility" }
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
@@ -44,6 +49,10 @@ thiserror = "2.0"
 tokio = { version = "1.48", features = ["macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 libc = "0.2"
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
+sha2 = "0.10"
+uuid = { version = "1.24", features = ["serde", "v5", "v7"] }
+zeroize = "1.8"
 
 [profile.release]
 codegen-units = 1
