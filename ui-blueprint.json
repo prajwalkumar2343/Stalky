@@ -1,0 +1,134 @@
+{
+  "product_goal": "Keep selected Mac context available locally while making capture, permissions, and recovery obvious.",
+  "primary_loop": [
+    "open Stalky",
+    "review readiness",
+    "start local context capture",
+    "see truthful live status",
+    "pause or inspect the result"
+  ],
+  "window": {
+    "mode": "hybrid",
+    "regions": [
+      {
+        "id": "sidebar",
+        "purpose": "Navigate the small set of durable destinations",
+        "placement": "leading"
+      },
+      {
+        "id": "context-header",
+        "purpose": "Explain the selected destination and host its single page action",
+        "placement": "content-top"
+      },
+      {
+        "id": "work-surface",
+        "purpose": "Show readiness, active context, permissions, or settings",
+        "placement": "center"
+      },
+      {
+        "id": "glance",
+        "purpose": "Show capture state and one contextual action without opening the workspace",
+        "placement": "menu-bar-adjacent-transient"
+      }
+    ]
+  },
+  "navigation": {
+    "primary": [
+      "Home",
+      "Screen",
+      "Interface",
+      "Activity"
+    ],
+    "selection_persistence": true,
+    "max_top_level": 4
+  },
+  "actions": {
+    "primary": {
+      "id": "toggle-capture",
+      "label": "Start capture / Pause capture",
+      "placement": "context-header-trailing",
+      "shortcut": "Command-Return"
+    },
+    "secondary": [
+      {
+        "id": "open-settings",
+        "label": "Settings",
+        "placement": "sidebar-bottom"
+      },
+      {
+        "id": "request-permission",
+        "label": "Request access / Open System Settings",
+        "placement": "inline-with-capability"
+      },
+      {
+        "id": "open-workspace",
+        "label": "Open Stalky",
+        "placement": "glance-footer-leading"
+      }
+    ],
+    "destructive": []
+  },
+  "states": {
+    "default": "Home shows capture readiness and the next required action.",
+    "empty": "A quiet explanation and one action replace fabricated metrics or decorative cards.",
+    "loading": "Use specific labels such as Checking access or Starting capture.",
+    "active": "Show Capture active beside Pause capture and state that frames remain in memory.",
+    "success": "Keep the live result visible with accepted and dropped frame counts.",
+    "error": "Preserve the current page, show the failure inline, and offer the relevant permission or retry action.",
+    "offline": "Explain that local inspection remains available and account-backed behavior is unavailable.",
+    "permission": "Explain why each OS permission is needed before Request access or Open System Settings.",
+    "disabled": "Do not render unavailable placeholder actions; explain unsupported capability in the affected row."
+  },
+  "interactions": {
+    "hotkeys": [
+      "Command-Return starts or pauses capture when the action is available",
+      "Command-Comma opens Settings"
+    ],
+    "focus_order": [
+      "sidebar destinations",
+      "context header primary action",
+      "status summary",
+      "local controls and collections"
+    ],
+    "hover_only_actions": []
+  },
+  "feedback": {
+    "acknowledgement_ms": 100,
+    "progress_after_ms": 1000,
+    "cancellable_operations": [
+      "screen capture",
+      "accessibility observation"
+    ]
+  },
+  "accessibility": {
+    "labels": true,
+    "keyboard_complete": true,
+    "reduced_motion": true,
+    "contrast_checked": true
+  },
+  "privacy": {
+    "capture_visibility": "A persistent text status and green state indicator are visible whenever capture is active.",
+    "permission_explanation": "Each permission row explains its local purpose before invoking the macOS prompt or System Settings.",
+    "retention_statement": "Raw screen frames and accessibility snapshots are held in bounded memory and are not uploaded or written to disk."
+  },
+  "qa": {
+    "sizes": [
+      "minimum 960x640",
+      "default 1240x800",
+      "wide 1512x900"
+    ],
+    "appearances": [
+      "light",
+      "dark"
+    ],
+    "flows": [
+      "first run",
+      "ready and start",
+      "active and pause",
+      "permission denied",
+      "capture failure and retry",
+      "glance expand and collapse",
+      "relaunch recovery"
+    ]
+  }
+}

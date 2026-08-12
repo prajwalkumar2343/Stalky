@@ -19,3 +19,7 @@ pub(crate) fn request_permission(
 ) -> Result<PermissionState, PlatformError> {
     permission_status(capability)
 }
+
+pub(crate) fn accessibility_permission_status_live() -> Result<PermissionState, PlatformError> {
+    permission_status(PermissionCapability::Accessibility)
+}

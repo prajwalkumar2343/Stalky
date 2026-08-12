@@ -1,5 +1,13 @@
 //! Versioned, content-bounded contracts for the local UI event boundary.
 
+mod memory;
+
+pub use memory::{
+    ConfirmMemoryRequest, CreateManualMemoryRequest, DeleteMemoryRequest, EditMemoryRequest,
+    MemoryCommandError, MemoryContextDto, MemoryContextRequestDto, MemoryDeleteMode,
+    MemoryErrorCode, MemorySearchRequest, MemorySearchResultDto, RejectMemoryRequest,
+};
+
 use mega_core::{
     AudioHealth, CaptureState, CorrelationId, LifecycleState, SequenceNumber, Subsystem,
     SubsystemHealth,

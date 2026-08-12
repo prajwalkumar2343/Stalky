@@ -10,6 +10,12 @@ Screen capture requires Screen Recording access in **System Settings → Privacy
 
 Accessibility observation is also opt-in. Stalky keeps a bounded, redacted snapshot and recent event list in memory. Controls are restricted to actions the selected element currently advertises; targets are revalidated immediately before execution, stale element IDs fail closed, and permission prompting occurs only from the dedicated user action.
 
+## Stalky glance
+
+The macOS build includes a small always-on-top companion called **Stalky glance**. It stays as a draggable 74-point glass orb and expands into a compact status panel showing capture state, accepted frames, permission readiness, and latest frame dimensions. The panel can start or pause capture and reopen the full workspace. Its top-right screen anchor is stored locally and restored across launches.
+
+The companion window uses Tauri's native macOS HUD material with a transparent, undecorated window. This requires Tauri's `macos-private-api` feature: signed and notarized direct distribution is supported, but the resulting build is not eligible for the Mac App Store.
+
 ## Development
 
 Prerequisites:

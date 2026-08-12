@@ -11,6 +11,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -24,6 +25,28 @@
         "fullscreen": false,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"
+      },
+      {
+        "label": "hud",
+        "title": "Stalky glance",
+        "url": "index.html?view=hud",
+        "width": 320,
+        "height": 68,
+        "minWidth": 320,
+        "minHeight": 68,
+        "maxWidth": 320,
+        "maxHeight": 68,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": false,
+        "focus": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "preventOverflow": true
       }
     ],
     "security": {

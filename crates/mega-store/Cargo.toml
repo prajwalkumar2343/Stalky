@@ -1,0 +1,18 @@
+[package]
+name = "mega-store"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Encrypted local SQLite persistence for Stalky structured memory"
+
+[dependencies]
+mega-memory.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

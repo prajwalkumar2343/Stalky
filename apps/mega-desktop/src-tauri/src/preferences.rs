@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mega_permissions::PermissionCapability;
 use serde::{Deserialize, Serialize};
 
-const PREFERENCES_VERSION: u8 = 1;
+const PREFERENCES_VERSION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +24,14 @@ struct StoredPreferences {
     onboarding_completed: bool,
     account_mode: Option<AccountMode>,
     permission_requests: BTreeMap<PermissionCapability, PermissionRequestMetadata>,
+    hud_anchor: Option<HudAnchor>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HudAnchor {
+    pub right_edge: i32,
+    pub top: i32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -73,6 +81,20 @@ impl PreferenceStore {
             .permission_requests
             .get(&capability)
             .is_some_and(|metadata| metadata.count > 0)
+    }
+
+    pub(crate) fn hud_anchor(&self) -> Option<HudAnchor> {
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hud_anchor
+    }
+
+    pub(crate) fn set_hud_anchor(&self, anchor: HudAnchor) -> Result<(), String> {
+        if self.hud_anchor() == Some(anchor) {
+            return Ok(());
+        }
+        self.update(|values| values.hud_anchor = Some(anchor))
     }
 
     pub fn complete_onboarding(&self, account_mode: AccountMode) -> Result<(), String> {
@@ -149,7 +171,7 @@ mod tests {
 
     use mega_permissions::PermissionCapability;
 
-    use super::{AccountMode, PreferenceStore};
+    use super::{AccountMode, HudAnchor, PreferenceStore};
 
     fn temporary_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -163,13 +185,18 @@ mod tests {
     }
 
     #[test]
-    fn only_onboarding_choice_and_request_metadata_are_persisted() {
+    fn onboarding_permission_metadata_and_hud_anchor_are_persisted() {
         let path = temporary_path();
         let store = PreferenceStore::new(path.clone());
         store.complete_onboarding(AccountMode::Local).unwrap();
         store
             .record_permission_request(PermissionCapability::Accessibility)
             .unwrap();
+        let anchor = HudAnchor {
+            right_edge: 1440,
+            top: 72,
+        };
+        store.set_hud_anchor(anchor).unwrap();
 
         let reloaded = PreferenceStore::new(path.clone());
         assert_eq!(
@@ -177,6 +204,7 @@ mod tests {
             Some(AccountMode::Local)
         );
         assert!(reloaded.has_requested(PermissionCapability::Accessibility));
+        assert_eq!(reloaded.hud_anchor(), Some(anchor));
         let _ = std::fs::remove_file(path);
     }
 
@@ -196,6 +224,26 @@ mod tests {
             assert_eq!(store.onboarding_state().account_mode, None);
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn version_one_preferences_load_with_an_empty_hud_anchor() {
+        let path = temporary_path();
+        std::fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "onboardingCompleted": true,
+                "accountMode": "local",
+                "permissionRequests": {}
+            }"#,
+        )
+        .unwrap();
+
+        let store = PreferenceStore::new(path.clone());
+        assert!(store.onboarding_state().completed);
+        assert_eq!(store.hud_anchor(), None);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
