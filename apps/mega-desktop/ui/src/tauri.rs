@@ -410,6 +410,18 @@ pub async fn permission_statuses() -> Result<PermissionStatuses, String> {
     invoke("permission_statuses").await
 }
 
+/// Live variant for the onboarding grant flow: the Accessibility probe uses
+/// the active event-tap check so a grant made in System Settings is seen
+/// without relaunching Stalky. Only call while the user is being asked for
+/// the permission.
+pub async fn permission_statuses_live() -> Result<PermissionStatuses, String> {
+    invoke("permission_statuses_live").await
+}
+
+pub async fn relaunch_app() -> Result<(), String> {
+    invoke("relaunch_app").await
+}
+
 pub async fn permission_request(
     capability: PermissionCapability,
 ) -> Result<PermissionStatuses, String> {
@@ -456,6 +468,10 @@ pub async fn google_auth_start() -> Result<GoogleAuthStatus, String> {
 
 pub async fn google_auth_sign_out() -> Result<GoogleAuthStatus, String> {
     invoke("google_auth_sign_out").await
+}
+
+pub async fn hud_open_main() -> Result<(), String> {
+    invoke("hud_open_main").await
 }
 
 #[derive(Serialize)]

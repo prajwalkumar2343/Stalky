@@ -2,6 +2,7 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use crate::components::{CHEVRON, DOT, Glyph, SEARCH, TARGET};
 use crate::tauri::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityNode, AccessibilityStatus,
     PermissionCapability, PermissionState, accessibility_action, accessibility_start,
@@ -176,7 +177,7 @@ pub fn Accessibility() -> impl IntoView {
                 <section class="ax-control-card">
                     <div class="ax-control-header"><span>"Selected element"</span><strong>{move || selected.get().as_ref().and_then(node_title).unwrap_or_else(|| "Nothing selected".to_owned())}</strong></div>
                     {move || selected.get().map_or_else(
-                        || view! { <div class="ax-empty"><span>"◎"</span><p>"Select a row in the live hierarchy to inspect its supported controls."</p></div> }.into_any(),
+                        || view! { <div class="ax-empty"><Glyph paths=TARGET /><p>"Select a row in the live hierarchy to inspect its supported controls."</p></div> }.into_any(),
                         |node| render_controls(node, busy, value_draft, set_value_draft, execute).into_any(),
                     )}
                 </section>
@@ -217,7 +218,7 @@ fn render_tree(
     set_value_draft: WriteSignal<String>,
 ) -> AnyView {
     let Some(root) = root else {
-        return view! { <div class="ax-empty"><span>"◇"</span><p>"Start observation to inspect the focused application."</p></div> }.into_any();
+        return view! { <div class="ax-empty"><Glyph paths=SEARCH /><p>"Start observation to inspect the focused application."</p></div> }.into_any();
     };
     let mut rows = Vec::new();
     flatten_tree(root, 0, &mut rows);
@@ -241,7 +242,7 @@ fn render_tree(
                         set_selected.set(Some(row_node.clone()));
                     }
                 >
-                    <span class="tree-chevron">{if node.children.is_empty() { "·" } else { "›" }}</span>
+                    <span class="tree-chevron" aria-hidden="true">{if node.children.is_empty() { view! { <Glyph paths=DOT /> }.into_any() } else { view! { <Glyph paths=CHEVRON /> }.into_any() }}</span>
                     <span class="tree-role">{role}</span>
                     <strong>{title}</strong>
                     {node.focused.unwrap_or(false).then_some(view! { <span class="ax-focus-chip">"Focused"</span> })}
