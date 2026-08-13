@@ -10,6 +10,7 @@ mod error;
     allow(dead_code, reason = "frame ingest is exercised by the macOS adapter")
 )]
 mod frame;
+mod ocr;
 mod policy;
 #[cfg_attr(
     not(any(target_os = "macos", test)),
@@ -28,6 +29,7 @@ pub use frame::{
     FrameMetrics, FrameProvenance, FrameRecord, FrameStatus, MAX_FRAME_BYTES, MAX_FRAME_HEIGHT,
     MAX_FRAME_WIDTH,
 };
+pub use ocr::{MAX_OCR_TEXT_CHARS, OcrObservation};
 pub use policy::{
     CaptureDecision, CapturePolicy, CaptureSkipReason, CaptureSource, DEFAULT_QUEUE_DEPTH,
     DEFAULT_SAMPLE_INTERVAL_MILLIS, FrameCandidate, FrameObservation, PrivacyDecision,

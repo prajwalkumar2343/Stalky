@@ -15,9 +15,10 @@ thiserror.workspace = true
 block2.workspace = true
 dispatch2.workspace = true
 objc2.workspace = true
-objc2-core-foundation.workspace = true
-objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay"] }
+objc2-core-foundation = { workspace = true, features = ["CFData"] }
+objc2-core-graphics = { workspace = true, features = ["CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGImage"] }
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-foundation.workspace = true
 objc2-screen-capture-kit.workspace = true
+objc2-vision.workspace = true
