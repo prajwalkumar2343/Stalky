@@ -14,6 +14,7 @@ sha2 = "=0.10.9"
 thiserror = "=2.0.20"
 uuid = { version = "=1.24.0", features = ["serde", "v4"] }
 zeroize = { version = "=1.9.0", features = ["alloc"] }
+zstd = "=0.13.3"
 
 [dev-dependencies]
 tempfile = "=3.27.0"
