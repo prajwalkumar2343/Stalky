@@ -225,6 +225,8 @@
 }
 
 .glance-pill {
+  position: relative;
+  isolation: isolate;
   width: 100%;
   height: 100%;
   box-sizing: border-box;
@@ -234,12 +236,39 @@
   padding: 6px 7px 6px 8px;
   border: 1px solid rgba(255, 255, 255, .16);
   border-radius: 14px;
-  background: rgba(24, 24, 23, .78);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+  background: linear-gradient(112deg, rgba(10, 14, 18, .38), rgba(18, 19, 21, .23) 52%, rgba(5, 10, 16, .35));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .22), inset 0 1px 0 rgba(255, 255, 255, .08);
   overflow: hidden;
 }
 
+.glance-pill::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(130% 120% at 12% -30%, rgba(255, 255, 255, .18), transparent 48%),
+    linear-gradient(105deg, rgba(94, 205, 255, .04), transparent 38%, rgba(216, 121, 255, .035) 74%, transparent);
+  content: "";
+  pointer-events: none;
+}
+
+.glass-surface {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  opacity: .94;
+  pointer-events: none;
+}
+
+.glass-surface[data-renderer="css"] { opacity: 0; }
+
 .glance-open {
+  position: relative;
+  z-index: 1;
   min-width: 0;
   flex: 1;
   display: flex;
@@ -264,6 +293,8 @@
 .glance-root.attention .glance-mark { background: rgba(226, 114, 106, .14); color: #ef8b83; }
 
 .glance-action {
+  position: relative;
+  z-index: 1;
   min-width: 58px;
   min-height: 32px;
   padding: 0 12px;
@@ -284,6 +315,7 @@
 @media (prefers-reduced-transparency: reduce) {
   .titlebar { background: var(--surface); }
   .glance-pill { background: #242423; }
+  .glass-surface { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
