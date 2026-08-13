@@ -147,6 +147,34 @@ impl MemoryStore {
         Ok(claimed)
     }
 
+    /// Extends a running extraction lease only while it is still owned by the
+    /// supplied worker and has not expired. A renewal racing with claim
+    /// recovery must fail closed so a stale worker can never extend a lease
+    /// that another worker may already own.
+    pub fn renew_extraction_lease(
+        &mut self,
+        job_id: &str,
+        worker_id: &str,
+        now_ms: i64,
+        lease_millis: i64,
+    ) -> Result<(), StoreError> {
+        validate_worker_and_lease(worker_id, lease_millis)?;
+        let lease_expires = now_ms
+            .checked_add(lease_millis)
+            .ok_or(StoreError::InvalidInput("lease timestamp overflow"))?;
+        let tx = self.connection_mut().transaction()?;
+        let changed = tx.execute(
+            "UPDATE extraction_jobs SET lease_expires_at=?4, updated_at=?3
+             WHERE id=?1 AND state='running' AND lease_owner=?2 AND lease_expires_at>?3",
+            rusqlite::params![job_id, worker_id, now_ms, lease_expires],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::LeaseLost);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn complete_extraction(
         &mut self,
         job_id: &str,
@@ -472,6 +500,47 @@ mod tests {
                 .filter(|event| event.event_type == MemoryEventType::SegmentClosed)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn lease_renewal_is_owner_checked_and_expiry_checked() {
+        let mut store = store_with_segment();
+        store
+            .enqueue_extraction("segment-1", "memory-v1", "correlation-1", 10)
+            .unwrap();
+        let job = store
+            .claim_extraction("worker-1", 20, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.lease_expires_at, Some(1_020));
+
+        store
+            .renew_extraction_lease(&job.id, "worker-1", 500, 2_000)
+            .unwrap();
+        let renewed_expiry: i64 = store
+            .connection()
+            .query_row(
+                "SELECT lease_expires_at FROM extraction_jobs WHERE id=?1",
+                [&job.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(renewed_expiry, 2_500);
+
+        assert!(matches!(
+            store.renew_extraction_lease(&job.id, "worker-2", 600, 1_000),
+            Err(StoreError::LeaseLost)
+        ));
+        assert!(matches!(
+            store.renew_extraction_lease(&job.id, "worker-1", 2_500, 1_000),
+            Err(StoreError::LeaseLost)
+        ));
+        assert!(
+            store
+                .claim_extraction("worker-2", 2_501, 1_000)
+                .unwrap()
+                .is_some()
         );
     }
 

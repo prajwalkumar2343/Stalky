@@ -11,6 +11,7 @@ pub use event_bus::{
 };
 pub use extraction_worker::{
     ExtractionJobHandler, ExtractionWorker, ExtractionWorkerConfig, ExtractionWorkerError,
+    ExtractionWorkerHealthSnapshot, ExtractionWorkerHealthStatus, ExtractionWorkerPhase,
     ExtractionWorkerReport, WorkerShutdown,
 };
 pub use supervisor::{SupervisionReport, Supervisor, SupervisorError, SupervisorTransition};
