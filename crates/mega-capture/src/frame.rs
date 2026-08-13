@@ -1,7 +1,7 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::{CaptureError, CaptureSource};
 
 pub const MAX_FRAME_WIDTH: usize = 2_048;
 pub const MAX_FRAME_HEIGHT: usize = 2_048;
@@ -36,11 +36,44 @@ pub struct FrameMetadata {
     pub timestamp_millis: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+pub struct FrameProvenance {
+    pub source: CaptureSource,
+    pub stable_source_id: u32,
+    pub stream_generation: u64,
+    pub sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+pub struct FrameDigest(pub [u8; 32]);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+pub struct FrameIdentity {
+    pub source: CaptureSource,
+    pub stable_source_id: u32,
+    pub digest: FrameDigest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct FrameRecord {
+    pub metadata: FrameMetadata,
+    pub provenance: FrameProvenance,
+    pub digest: FrameDigest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameAdmission {
+    Accepted,
+    Duplicate,
+    Replaced { previous: FrameIdentity },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BgraFrame {
     pub(crate) metadata: FrameMetadata,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) digest: u64,
+    pub(crate) provenance: FrameProvenance,
+    pub(crate) digest: FrameDigest,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -52,6 +85,7 @@ pub struct FrameMetrics {
     pub replaced_frames: u64,
     pub stream_errors: u64,
     pub last_frame: Option<FrameMetadata>,
+    pub last_provenance: Option<FrameProvenance>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -65,7 +99,23 @@ impl FrameIngest {
         Self::default()
     }
 
-    pub fn ingest(&mut self, input: FrameInput<'_>) -> Result<(), crate::CaptureError> {
+    pub fn ingest(&mut self, input: FrameInput<'_>) -> Result<(), CaptureError> {
+        self.ingest_with_provenance(legacy_provenance(input.timestamp_millis), input)
+            .map(|_| ())
+    }
+
+    pub fn ingest_with_provenance(
+        &mut self,
+        provenance: FrameProvenance,
+        input: FrameInput<'_>,
+    ) -> Result<FrameAdmission, CaptureError> {
+        if provenance.stable_source_id == 0
+            || provenance.stream_generation == 0
+            || provenance.sequence == 0
+        {
+            self.metrics.invalid_frames = self.metrics.invalid_frames.saturating_add(1);
+            return Err(CaptureError::InvalidProvenance);
+        }
         let compact_len = match validate_frame_input(&input) {
             Ok(compact_len) => compact_len,
             Err(error) => {
@@ -78,6 +128,7 @@ impl FrameIngest {
             bytes.extend_from_slice(&row[..input.width * BYTES_PER_PIXEL]);
         }
 
+        let frame_digest = digest(&bytes);
         self.commit_frame(BgraFrame {
             metadata: FrameMetadata {
                 width: input.width,
@@ -87,11 +138,15 @@ impl FrameIngest {
                 timestamp_millis: input.timestamp_millis,
             },
             bytes,
-            digest: 0,
+            provenance,
+            digest: frame_digest,
         })
     }
 
-    pub(crate) fn ingest_owned(&mut self, mut frame: BgraFrame) -> Result<(), crate::CaptureError> {
+    pub(crate) fn ingest_owned(
+        &mut self,
+        mut frame: BgraFrame,
+    ) -> Result<FrameAdmission, CaptureError> {
         let input = FrameInput {
             status: FrameStatus::Complete,
             width: frame.metadata.width,
@@ -105,33 +160,47 @@ impl FrameIngest {
             self.metrics.invalid_frames = self.metrics.invalid_frames.saturating_add(1);
             return Err(error);
         }
+        if frame.provenance.stable_source_id == 0
+            || frame.provenance.stream_generation == 0
+            || frame.provenance.sequence == 0
+        {
+            self.metrics.invalid_frames = self.metrics.invalid_frames.saturating_add(1);
+            return Err(CaptureError::InvalidProvenance);
+        }
         frame.metadata.byte_len = frame.bytes.len();
+        frame.digest = digest(&frame.bytes);
         self.commit_frame(frame)
     }
 
-    fn commit_frame(&mut self, mut frame: BgraFrame) -> Result<(), crate::CaptureError> {
-        let mut hasher = DefaultHasher::new();
-        frame.bytes.hash(&mut hasher);
-        frame.digest = hasher.finish();
-        if self
-            .latest
-            .as_ref()
-            .is_some_and(|latest| latest.digest == frame.digest)
-        {
+    fn commit_frame(&mut self, frame: BgraFrame) -> Result<FrameAdmission, CaptureError> {
+        if self.latest.as_ref().is_some_and(|latest| {
+            latest.provenance.source == frame.provenance.source
+                && latest.provenance.stable_source_id == frame.provenance.stable_source_id
+                && latest.digest == frame.digest
+        }) {
             self.metrics.duplicate_frames = self.metrics.duplicate_frames.saturating_add(1);
             if let Some(latest) = self.latest.as_mut() {
                 latest.metadata.timestamp_millis = frame.metadata.timestamp_millis;
+                latest.provenance = frame.provenance;
                 self.metrics.last_frame = Some(latest.metadata.clone());
+                self.metrics.last_provenance = Some(latest.provenance);
             }
-            return Ok(());
+            return Ok(FrameAdmission::Duplicate);
         }
-        if self.latest.is_some() {
+        let previous = self.latest.as_ref().map(|latest| FrameIdentity {
+            source: latest.provenance.source,
+            stable_source_id: latest.provenance.stable_source_id,
+            digest: latest.digest,
+        });
+        let admission = previous.map_or(FrameAdmission::Accepted, |previous| {
             self.metrics.replaced_frames = self.metrics.replaced_frames.saturating_add(1);
-        }
+            FrameAdmission::Replaced { previous }
+        });
         self.metrics.last_frame = Some(frame.metadata.clone());
+        self.metrics.last_provenance = Some(frame.provenance);
         self.latest = Some(frame);
         self.metrics.accepted_frames = self.metrics.accepted_frames.saturating_add(1);
-        Ok(())
+        Ok(admission)
     }
 
     pub fn reject(
@@ -162,6 +231,14 @@ impl FrameIngest {
         self.latest.as_ref().map(|frame| frame.metadata.clone())
     }
 
+    pub fn latest_record(&self) -> Option<FrameRecord> {
+        self.latest.as_ref().map(|frame| FrameRecord {
+            metadata: frame.metadata.clone(),
+            provenance: frame.provenance,
+            digest: frame.digest,
+        })
+    }
+
     pub fn has_raw_frame(&self) -> bool {
         self.latest
             .as_ref()
@@ -176,6 +253,19 @@ impl FrameIngest {
     pub(crate) fn latest_bytes(&self) -> Option<&[u8]> {
         self.latest.as_ref().map(|frame| frame.bytes.as_slice())
     }
+}
+
+fn legacy_provenance(timestamp_millis: Option<u64>) -> FrameProvenance {
+    FrameProvenance {
+        source: CaptureSource::PrimaryDisplay,
+        stable_source_id: 1,
+        stream_generation: 1,
+        sequence: timestamp_millis.unwrap_or(1).max(1),
+    }
+}
+
+fn digest(bytes: &[u8]) -> FrameDigest {
+    FrameDigest(Sha256::digest(bytes).into())
 }
 
 pub fn validate_frame_input(input: &FrameInput<'_>) -> Result<usize, crate::CaptureError> {
@@ -241,8 +331,8 @@ pub fn validate_frame_input(input: &FrameInput<'_>) -> Result<usize, crate::Capt
 #[cfg(test)]
 mod tests {
     use super::{
-        BgraFrame, FrameIngest, FrameInput, FrameStatus, MAX_FRAME_BYTES, MAX_FRAME_HEIGHT,
-        MAX_FRAME_WIDTH, validate_frame_input,
+        BgraFrame, FrameAdmission, FrameIngest, FrameInput, FrameProvenance, FrameStatus,
+        MAX_FRAME_BYTES, MAX_FRAME_HEIGHT, MAX_FRAME_WIDTH, validate_frame_input,
     };
 
     fn input(data: &[u8], timestamp_millis: u64) -> FrameInput<'_> {
@@ -327,6 +417,56 @@ mod tests {
         assert_eq!(ingest.metrics().duplicate_frames, 1);
         assert_eq!(ingest.latest_metadata().unwrap().timestamp_millis, Some(11));
         assert_eq!(ingest.metrics().replaced_frames, 0);
+    }
+
+    #[test]
+    fn same_pixels_from_different_sources_are_not_deduplicated() {
+        let data = [1; 16];
+        let mut ingest = FrameIngest::new();
+        ingest
+            .ingest_with_provenance(
+                FrameProvenance {
+                    source: crate::CaptureSource::Display { id: 1 },
+                    stable_source_id: 1,
+                    stream_generation: 1,
+                    sequence: 1,
+                },
+                input(&data, 10),
+            )
+            .unwrap();
+        let admission = ingest
+            .ingest_with_provenance(
+                FrameProvenance {
+                    source: crate::CaptureSource::Display { id: 2 },
+                    stable_source_id: 2,
+                    stream_generation: 1,
+                    sequence: 2,
+                },
+                input(&data, 11),
+            )
+            .unwrap();
+
+        assert!(matches!(admission, FrameAdmission::Replaced { .. }));
+        assert_eq!(ingest.metrics().duplicate_frames, 0);
+    }
+
+    #[test]
+    fn invalid_provenance_fails_closed() {
+        let mut ingest = FrameIngest::new();
+        let error = ingest
+            .ingest_with_provenance(
+                FrameProvenance {
+                    source: crate::CaptureSource::Display { id: 1 },
+                    stable_source_id: 0,
+                    stream_generation: 1,
+                    sequence: 1,
+                },
+                input(&[1; 16], 1),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, crate::CaptureError::InvalidProvenance));
+        assert_eq!(ingest.metrics().invalid_frames, 1);
     }
 
     #[test]

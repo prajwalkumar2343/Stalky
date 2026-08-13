@@ -19,9 +19,9 @@ use crate::operations_repo::{
 };
 use crate::source_repo::sensitivity_str;
 
-use crate::{MIGRATION_0001, MIGRATION_0002, TAXONOMY_VERSION};
+use crate::{MIGRATION_0001, MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, TAXONOMY_VERSION};
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone)]
 pub struct MemoryStoreConfig {
@@ -62,7 +62,7 @@ impl MemoryStoreConfig {
     }
 
     #[cfg(test)]
-    fn unencrypted_test_at(path: PathBuf) -> Self {
+    pub(crate) fn unencrypted_test_at(path: PathBuf) -> Self {
         Self {
             path,
             encryption_key: None,
@@ -701,6 +701,34 @@ impl MemoryStore {
             )?;
             tx.commit()?;
         }
+        let current: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        if current < 3 {
+            let tx = self.connection.transaction()?;
+            tx.execute_batch(MIGRATION_0003)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at, checksum) VALUES (3, ?1, ?2)",
+                rusqlite::params![now_millis()?, migration_checksum(MIGRATION_0003)],
+            )?;
+            tx.commit()?;
+        }
+        let current: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        if current < 4 {
+            let tx = self.connection.transaction()?;
+            tx.execute_batch(MIGRATION_0004)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at, checksum) VALUES (4, ?1, ?2)",
+                rusqlite::params![now_millis()?, migration_checksum(MIGRATION_0004)],
+            )?;
+            tx.commit()?;
+        }
         self.verify_migrations()
     }
 
@@ -708,6 +736,8 @@ impl MemoryStore {
         for (version, expected) in [
             (1_i64, migration_checksum(MIGRATION_0001)),
             (2_i64, migration_checksum(MIGRATION_0002)),
+            (3_i64, migration_checksum(MIGRATION_0003)),
+            (4_i64, migration_checksum(MIGRATION_0004)),
         ] {
             let actual: Option<String> = self
                 .connection
@@ -1464,6 +1494,12 @@ pub enum StoreError {
     InvalidPath,
     #[error("invalid memory input: {0}")]
     InvalidInput(&'static str),
+    #[error("history admission idempotency key conflicts with an existing entry")]
+    HistoryIdempotencyConflict,
+    #[error("history entry conflicts with an existing entry ID")]
+    HistoryEntryConflict,
+    #[error("audio asset recovery lease is missing or owned by another worker")]
+    AudioRecoveryLeaseLost,
     #[error("memory was not found")]
     NotFound,
     #[error("unknown category: {0}")]

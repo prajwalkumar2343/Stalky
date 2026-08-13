@@ -71,6 +71,7 @@ struct OpenSegment {
     ended_at_ms: i64,
     source_event_ids: Vec<SourceEventId>,
     extraction_texts: Vec<String>,
+    seen_source_event_ids: HashSet<SourceEventId>,
     seen_text: HashSet<String>,
 }
 
@@ -91,10 +92,16 @@ impl ActivitySegmenter {
         let closed = boundary.and_then(|reason| self.take_open(reason));
         let open = self.open.get_or_insert_with(|| OpenSegment::new(&input));
         let normalized = normalize_observed_text(&input.privacy_filtered_text);
-        let admitted = open.seen_text.insert(normalized.clone());
+        let is_new_source = open
+            .seen_source_event_ids
+            .insert(input.source_event_id.clone());
+        if is_new_source {
+            open.source_event_ids.push(input.source_event_id);
+        }
+        let admitted =
+            is_new_source && !normalized.is_empty() && open.seen_text.insert(normalized.clone());
         open.ended_at_ms = open.ended_at_ms.max(input.ended_at_ms);
         if admitted {
-            open.source_event_ids.push(input.source_event_id);
             open.extraction_texts.push(normalized);
         }
         Ok(SegmentTransition { closed, admitted })
@@ -126,6 +133,7 @@ impl OpenSegment {
             ended_at_ms: input.ended_at_ms,
             source_event_ids: vec![],
             extraction_texts: vec![],
+            seen_source_event_ids: HashSet::new(),
             seen_text: HashSet::new(),
         }
     }
@@ -220,7 +228,34 @@ mod tests {
             .unwrap();
         let closed = transition.closed.unwrap();
         assert_eq!(closed.close_reason, SegmentBoundary::AppChanged);
-        assert_eq!(closed.source_event_ids, vec![SourceEventId::new("s1")]);
+        assert_eq!(
+            closed.source_event_ids,
+            vec![SourceEventId::new("s1"), SourceEventId::new("s2")]
+        );
+        assert_eq!(closed.extraction_texts, vec!["User likes Svelte"]);
+    }
+
+    #[test]
+    fn empty_or_repeated_source_text_keeps_provenance_without_extracting_empty_text() {
+        let mut segmenter = ActivitySegmenter::default();
+        assert!(
+            !segmenter
+                .admit(input("s1", "slack", 0, "   "))
+                .unwrap()
+                .admitted
+        );
+        assert!(
+            segmenter
+                .admit(input("s2", "slack", 20, "User likes Svelte"))
+                .unwrap()
+                .admitted
+        );
+        let closed = segmenter.close(SegmentBoundary::SessionEnded).unwrap();
+        assert_eq!(
+            closed.source_event_ids,
+            vec![SourceEventId::new("s1"), SourceEventId::new("s2")]
+        );
+        assert_eq!(closed.extraction_texts, vec!["User likes Svelte"]);
     }
 
     #[test]

@@ -7,6 +7,8 @@
     <meta name="description" content="Stalky ambient context infrastructure" />
     <title>Stalky</title>
     <link data-trunk rel="css" href="styles.css" />
+    <link data-trunk rel="copy-file" href="glass.js" />
+    <script type="module" src="glass.js"></script>
     <!-- Rust release codegen already optimizes the bundle. Keep Trunk's
          optional wasm-opt pass off because older cached wasm-opt binaries do
          not understand the bulk-memory instructions emitted by current Rust. -->

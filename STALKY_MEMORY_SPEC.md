@@ -2,7 +2,7 @@
 
 Status: approved architecture, ready for implementation planning  
 Scope: Stalky's derived long-term memory subsystem  
-Excludes: raw screen/audio retention, capture implementation, general authentication, and autonomous computer control
+Excludes: screenshot/video retention, capture implementation details, general authentication, and autonomous computer control. Encrypted audio-history retention is in scope.
 
 ## 1. Objective
 
@@ -80,16 +80,17 @@ The extraction path is a fixed workflow, not an autonomous agent. The model prop
 
 ## 3. Non-negotiable invariants
 
-1. Raw BGRA frame bytes and raw audio remain ephemeral under the current Stalky privacy contract. The memory database must not introduce implicit screenshot or recording retention.
-2. A memory is derived data, never the sole record of what happened. Each accepted memory must retain at least one source reference unless it was entered manually.
-3. `source_app` and `applies_to_app` are different concepts.
-4. Apps, categories, entities, and scopes are independent dimensions. None is encoded by overloading another.
-5. Model output never writes directly to SQL. It produces a validated `MemoryCandidate` or `MemoryMutationPlan`.
-6. Existing memory content is not silently overwritten. Updates create a new assertion and link the old assertion as superseded.
-7. Inferred memories cannot silently replace explicit memories.
-8. Private captured text is untrusted content. It may provide facts, but it cannot alter Stalky's system policy or extraction instructions.
-9. Context retrieval is bounded. The complete memory database is never inserted into an LLM prompt.
-10. Deleting a memory must also remove it from FTS, vector retrieval, generated profiles, and optional sync through a tombstone.
+1. Raw BGRA frame bytes and every encoded screenshot/video representation remain ephemeral. They may be inspected transiently for on-device OCR, then must be discarded and cannot be admitted by any durable storage API.
+2. Audio may be retained only as explicit, encrypted audio-history assets governed by the history retention and byte-quota policy. The SQL database stores metadata and searchable transcript evidence, never plaintext audio bytes.
+3. A memory is derived data, never the sole record of what happened. Each accepted memory must retain at least one source reference unless it was entered manually.
+4. `source_app` and `applies_to_app` are different concepts.
+5. Apps, categories, entities, and scopes are independent dimensions. None is encoded by overloading another.
+6. Model output never writes directly to SQL. It produces a validated `MemoryCandidate` or `MemoryMutationPlan`.
+7. Existing memory content is not silently overwritten. Updates create a new assertion and link the old assertion as superseded.
+8. Inferred memories cannot silently replace explicit memories.
+9. Private captured text is untrusted content. It may provide facts, but it cannot alter Stalky's system policy or extraction instructions.
+10. Context retrieval is bounded. The complete memory database is never inserted into an LLM prompt.
+11. Deleting a memory must also remove it from FTS, vector retrieval, generated profiles, and optional sync through a tombstone.
 
 ## 4. Memory model
 
@@ -334,12 +335,13 @@ Raw frame bytes and raw PCM are not valid `source_events` payloads.
 ### 8.2 Source kinds
 
 - `accessibility_segment`
+- `ocr_segment`
 - `audio_transcript_segment`
 - `assistant_conversation`
 - `manual_entry`
 - `structured_import`
 
-OCR can be added later as `ocr_segment`, but only after the capture/privacy milestone explicitly permits derived OCR persistence.
+`ocr_segment` is a fallback only when bounded Accessibility text is unavailable. Frame bytes remain transient and only derived text/confidence/provenance may enter durable storage.
 
 ### 8.3 Activity segments
 
@@ -802,6 +804,8 @@ FTS remains inside the encrypted database. Do not build a plaintext sidecar inde
 ### 15.2 Retention defaults
 
 - source evidence text: 30 days by default;
+- encrypted audio-history assets: 30 days by default and additionally bounded by a configurable byte quota;
+- transient OCR inputs: zero retention; only bounded recognized text and confidence metadata may persist;
 - evidence metadata and hashes: retained while referenced by an active memory;
 - rejected candidate audit entries: 7 days;
 - active memories: until updated, expired, or forgotten;
@@ -810,6 +814,8 @@ FTS remains inside the encrypted database. Do not build a plaintext sidecar inde
 - profiles and embeddings: rebuildable and deleted immediately with their source memory.
 
 Deleting expired source text must preserve enough metadata to explain the source app and timestamp without retaining the sensitive excerpt.
+
+Audio deletion is two-phase and recoverable: mark the asset deleting in SQL, remove the encrypted vault object, then remove its timeline metadata. Startup recovery must finish interrupted deletions and remove abandoned temporary objects. Quota enforcement deletes the oldest unpinned audio assets first and never deletes a referenced canonical memory.
 
 ### 15.3 Optional cloud sync
 
@@ -1003,9 +1009,10 @@ Logs may include IDs, counts, timings, model names, and policy outcomes. They mu
 ### Slice 3 — source events and segmentation
 
 - Admit bounded redacted Accessibility evidence.
+- Admit bounded derived OCR evidence only through the privacy-gated fallback path.
 - Implement activity-segment boundaries and deduplication.
 - Add extraction queue state and crash recovery.
-- Do not add OCR or raw-media persistence.
+- Do not add screenshot/video or plaintext-audio persistence.
 
 ### Slice 4 — extraction and reconciliation
 
@@ -1040,8 +1047,7 @@ Logs may include IDs, counts, timings, model names, and policy outcomes. They mu
 - a general-purpose knowledge graph database;
 - autonomous nightly “dream” agents that rewrite memory;
 - cloud-first memory storage;
-- raw screenshot/audio archival;
-- OCR persistence;
+- screenshot or video archival in any encoding;
 - automatic taxonomy creation;
 - automatic sensitive-trait inference;
 - remote reranking on every query;

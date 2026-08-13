@@ -11,6 +11,7 @@ impl CaptureBackend for UnsupportedBackend {
         &self,
         _source: CaptureSource,
         _events: Arc<dyn CaptureEvents>,
+        _stream_generation: u64,
     ) -> Result<Box<dyn CaptureSession>, CaptureError> {
         Err(CaptureError::UnsupportedTarget)
     }

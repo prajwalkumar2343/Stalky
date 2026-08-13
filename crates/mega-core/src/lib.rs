@@ -12,7 +12,12 @@ mod state;
 mod subsystem;
 
 pub use audio::{AudioHealth, AudioState, AudioStatus};
-pub use capture::{CaptureHealth, CaptureMode, CaptureSource, CaptureState, CaptureStopReason};
+pub use capture::{
+    AccessibilityCaptureEvent, CAPTURE_EVENT_SCHEMA_VERSION, CaptureContractError, CaptureEvent,
+    CaptureEventEnvelope, CaptureEventKind, CaptureHealth, CaptureMode, CapturePrivacyClass,
+    CaptureSource, CaptureSourceProvenance, CaptureState, CaptureStopReason, FrameCaptureEvent,
+    MAX_CAPTURE_EVENT_TEXT_CHARS,
+};
 pub use identifiers::{CorrelationId, SequenceNumber};
 pub use lifecycle::{LifecycleState, LifecycleTransition, LifecycleTransitionError};
 pub use mega_permissions::{

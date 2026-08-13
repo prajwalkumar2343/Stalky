@@ -3,6 +3,8 @@ members = [
     "apps/mega-desktop/src-tauri",
     "apps/mega-desktop/ui",
     "backend",
+    "crates/mega-audio",
+    "crates/mega-audio-capture",
     "crates/mega-core",
     "crates/mega-capture",
     "crates/mega-ipc",
@@ -22,6 +24,8 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
+mega-audio = { path = "crates/mega-audio" }
+mega-audio-capture = { path = "crates/mega-audio-capture" }
 mega-core = { path = "crates/mega-core" }
 mega-capture = { path = "crates/mega-capture" }
 mega-ipc = { path = "crates/mega-ipc" }
@@ -43,6 +47,7 @@ objc2-core-media = { version = "0.3.2", default-features = false, features = ["s
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn", "objc2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSError", "NSValue"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCError", "SCShareableContent", "SCStream", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
+objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNObservation", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNTypes", "objc2-core-foundation", "objc2-core-graphics"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

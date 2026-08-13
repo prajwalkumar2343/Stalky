@@ -1,6 +1,7 @@
 mod accessibility;
 mod app;
 mod components;
+mod glass;
 mod hud;
 mod onboarding;
 mod tauri;
@@ -17,5 +18,8 @@ fn main() {
         leptos::mount::mount_to_body(hud::Hud);
     } else {
         leptos::mount::mount_to_body(app::App);
+        wasm_bindgen_futures::spawn_local(async {
+            let _ = tauri::main_window_ready().await;
+        });
     }
 }

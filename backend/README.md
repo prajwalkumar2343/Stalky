@@ -1,18 +1,30 @@
 # Stalky Backend
 
-A minimal, authenticated Rust (Axum) backend for the Stalky macOS desktop app.
-It is a member of the Stalky workspace (`package name: stalky-backend`) and
-currently exposes only:
+A versioned, authenticated Rust (Axum) backend for Stalky and the Aura Android
+compatibility client. It is a member of the Stalky workspace (`package name:
+stalky-backend`) and exposes:
 
 - `GET /health/live` and `GET /health/ready` — liveness/readiness probes.
-- `GET /v1/me` — a minimal identity projection from a verified Supabase JWT.
+- `GET /v1/me` and `GET/PATCH /v1/profile` — verified identity and tenant profile.
+- `/v1/memories`, `/v1/todos`, and `/v1/mini-apps/{id}/records` — durable,
+  user-scoped application state.
+- `/v1/assistant/runs` — durable run admission, polling, cancellation,
+  idempotency, and ordered events.
+- `POST /v1/assistant/chat` — Rust-native Gemini, OpenAI Responses, and
+  OpenRouter provider adapters with server-only encrypted credential handling.
 
-There are **no mutation endpoints**. Upload/sync, remote transcription, and
-agent/automation APIs are deliberately absent and out of scope; if they are
-approved later they arrive as a separate, reviewed unit.
+Equivalent resource paths are mounted under `/api/` for the existing Android
+client. Aura's former password/Google/refresh-token handlers are compatibility
+routes that return a stable `501` until the client completes its Supabase Auth
+migration. Mini-app generation, model discovery, and transcription remain
+explicit `501` routes. Durable assistant runs are executed by the separate
+`agent-worker` binary; chat calls providers directly through the Rust adapter
+registry.
 
 The OpenAPI 3.1 contract lives in [`openapi.yaml`](openapi.yaml). The Supabase
-sidecar migration is in [`migrations/0001_profiles.sql`](migrations/0001_profiles.sql).
+migrations are in [`migrations/0001_profiles.sql`](migrations/0001_profiles.sql)
+and [`migrations/0002_application_state.sql`](migrations/0002_application_state.sql)
+plus [`migrations/0003_agent_leases.sql`](migrations/0003_agent_leases.sql).
 
 ## Local development
 
@@ -29,9 +41,18 @@ By default the backend binds to `127.0.0.1:8080` and requires
 ```sh
 export SUPABASE_URL="https://<project-ref>.supabase.co"
 export BIND_ADDRESS="127.0.0.1:8080"
+export DATABASE_URL="postgresql://<user>:<password>@<host>:5432/postgres"
+export STALKY_PROVIDER_CREDENTIAL_KEY="<64 hex characters>"
 export RUST_LOG="info"
 cargo run -p stalky-backend
+
+# in a separate process, after migrations are applied
+cargo run -p stalky-backend --bin agent-worker
 ```
+
+`DATABASE_URL` selects the Postgres/Supabase store. If omitted, local
+development uses process-local in-memory persistence and logs a warning; a
+production deployment should always configure the database URL.
 
 Quality gates (workspace-wide, enforced by CI):
 
@@ -47,6 +68,8 @@ Smoke test locally:
 curl -i http://127.0.0.1:8080/health/ready
 curl -i -H "Authorization: Bearer <supabase-access-token>" \
   http://127.0.0.1:8080/v1/me
+curl -i -H "Authorization: Bearer <supabase-access-token>" \
+  http://127.0.0.1:8080/v1/memories
 ```
 
 ## Supabase setup: Google sign-in (exact steps)
@@ -114,9 +137,17 @@ adds least-privilege `select`/`insert`/`update` policies scoped to
 `auth.uid()`, and revokes the broad `anon`/`public` grants. There is no
 `delete` policy, so a user can never remove their own row.
 
-Apply it from the Supabase dashboard (**SQL Editor**) or `supabase db push`
-from `migrations/` when profile persistence is introduced. The current
-`GET /v1/me` endpoint intentionally does not query this table.
+`migrations/0002_application_state.sql` adds tenant-scoped memories, todos,
+mini-app records, agent runs/events, idempotency keys, devices, and upload
+metadata with ownership policies and indexes. `0003_agent_leases.sql` adds
+atomic worker leases, fencing tokens, retry scheduling, and encrypted
+credential ciphertext. Raw provider keys are never stored; the Rust run store
+strips `api_key` before durable persistence and clears ciphertext on terminal
+settlement.
+
+Apply all three from the Supabase dashboard (**SQL Editor**) or `supabase db push`
+from `migrations/`. `GET /v1/profile` lazily creates the caller's profile row;
+`PATCH /v1/profile` updates its bounded display/avatar fields.
 
 ## Production security boundary
 
@@ -129,8 +160,11 @@ from `migrations/` when profile persistence is introduced. The current
   server-side admin access, it must be added through a separately justified,
   reviewed, least-privilege mechanism — never by shipping `service_role`.
 - The backend stores no Supabase credentials at rest; configuration comes from
-  the environment. Real `.env*` files are git-ignored; only `.env.example`
-  templates are allowed into source control.
+  the environment. Agent request API keys are encrypted with the server-only
+  vault key for queued execution, never included in request payloads/events,
+  and cleared after terminal settlement.
+  Real `.env*` files are git-ignored; only `.env.example` templates are allowed
+  into source control.
 
 ## Deployment and health checks
 
@@ -141,6 +175,7 @@ from `migrations/` when profile persistence is introduced. The current
 docker build -f backend/Dockerfile -t stalky-backend:latest .
 docker run --rm -p 8080:8080 \
   -e SUPABASE_URL="https://<project-ref>.supabase.co" \
+  -e DATABASE_URL="postgresql://<user>:<password>@<host>:5432/postgres" \
   -e RUST_LOG="info" \
   stalky-backend:latest
 ```
@@ -169,10 +204,11 @@ readinessProbe:
 
 ## Privacy
 
-Raw screen and audio data are **not persisted or transmitted** by Stalky.
-Screen frames and microphone PCM stay in process memory only, are never written
-to the backend, never uploaded, and are discarded on stop/pause. The backend
-currently stores no user content. Remote transcription is explicitly out of scope.
+Raw screen and audio data are **not persisted or transmitted** by this backend
+slice. Screen frames and microphone PCM stay in the desktop process. The
+backend does persist the explicit tenant resources listed above; raw provider
+keys are not persisted. Remote transcription remains a future provider-adapter
+milestone.
 
 ## Pricing
 

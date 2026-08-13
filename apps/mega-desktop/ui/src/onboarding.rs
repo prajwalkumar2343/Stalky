@@ -10,8 +10,8 @@ use crate::components::{ARROW_UP_RIGHT, CHEVRON, CHIP, Glyph, SHIELD, SPARKLE};
 use crate::tauri::{
     AccountMode, GoogleAuthStatus, OnboardingState, PermissionCapability, PermissionState,
     PermissionStatuses, google_auth_start, google_auth_status, onboarding_complete,
-    onboarding_set_account_mode, permission_open_settings, permission_request, permission_statuses,
-    permission_statuses_live, relaunch_app,
+    onboarding_set_account_mode, permission_request, permission_statuses, permission_statuses_live,
+    relaunch_app,
 };
 
 #[derive(Clone, Copy)]
@@ -23,7 +23,7 @@ struct PermissionStepCopy {
     privacy: &'static str,
 }
 
-// Screen Recording is deliberately requested last: granting it can require an
+// Screen Recording is deliberately requested last: its grant can require an
 // app restart to take effect, so asking earlier would send the user back into
 // System Settings mid-flow.
 const PERMISSION_STEPS: [PermissionStepCopy; 3] = [
@@ -118,9 +118,6 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
                     };
                     if let Ok(status) = statuses {
                         set_permissions.set(status);
-                    }
-                    if let Ok(status) = google_auth_status().await {
-                        set_auth.set(status);
                     }
                     if !again.swap(false, Ordering::Relaxed) {
                         break;
@@ -274,15 +271,6 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
         });
     };
 
-    let open_settings = move |_| {
-        let capability = step_capability(step.get_untracked());
-        spawn_local(async move {
-            if let Err(error) = permission_open_settings(capability).await {
-                set_message.set(Some(error));
-            }
-        });
-    };
-
     let request_permission = move |_| {
         if busy.get_untracked() {
             return;
@@ -299,10 +287,6 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
             advance(());
             return;
         }
-        if state.needs_settings() {
-            open_settings(());
-            return;
-        }
         if current.capability == PermissionCapability::Accessibility {
             set_accessibility_requested.set(true);
         }
@@ -311,14 +295,7 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
         spawn_local(async move {
             match permission_request(current.capability).await {
                 Ok(status) => set_permissions.set(status),
-                Err(error) => {
-                    set_message.set(Some(error.clone()));
-                    // A previous denial cannot be re-prompted; send the user
-                    // to System Settings instead of leaving them stuck.
-                    if error.contains("System Settings") {
-                        let _ = permission_open_settings(current.capability).await;
-                    }
-                }
+                Err(error) => set_message.set(Some(error)),
             }
             set_busy.set(false);
             refresh.run(());
@@ -395,7 +372,7 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
                             </div>
                             <div class="permission-status-large" class:granted=move || state.get().is_granted() class:waiting=move || busy.get()>
                                 <span class="status-symbol" aria-hidden="true">{move || status_symbol(state.get(), busy.get())}</span>
-                                <span><strong>{move || state.get().label()}</strong><small>{move || status_detail(state.get(), busy.get())}</small></span>
+                                <span><strong>{move || state.get().label()}</strong><small>{move || status_detail(state.get(), busy.get(), current.capability)}</small></span>
                             </div>
                             {move || if state.get().is_granted() {
                                 view! { <div class="permission-action-row"><span class="inline-success">"Ready on this Mac"</span><button class="primary-button" disabled=move || busy.get() on:click=move |_| advance(())>{if is_last { "Finish setup" } else { "Continue" }}</button></div> }.into_any()
@@ -403,10 +380,8 @@ pub fn Onboarding(on_complete: Callback<OnboardingState>) -> impl IntoView {
                                 view! { <div class="permission-action-row"><span class="inline-note restart-note">"Restart to apply the grant"</span><button class="primary-button" disabled=move || busy.get() on:click=restart>{move || if busy.get() { "Restarting…" } else { "Restart Stalky" }}</button><button class="text-button" disabled=move || busy.get() on:click=move |_| advance(())>"Later"</button></div> }.into_any()
                             } else if state.get() == PermissionState::Unsupported {
                                 view! { <div class="permission-action-row"><span class="inline-note">"Optional in this build"</span><button class="primary-button" on:click=move |_| advance(())>{if is_last { "Finish setup" } else { "Continue" }}</button></div> }.into_any()
-                            } else if state.get().needs_settings() {
-                                view! { <div class="permission-action-row"><button class="primary-button" on:click=move |_| open_settings(())>"Open System Settings"</button><button class="text-button" disabled=move || busy.get() on:click=move |_| advance(())>"Skip for now"</button></div> }.into_any()
                             } else {
-                                view! { <div class="permission-action-row"><button class="primary-button" disabled=move || busy.get() on:click=request_permission>{move || if busy.get() { "Waiting…" } else { "Request access" }}</button><button class="text-button" disabled=move || busy.get() on:click=move |_| advance(())>"Skip for now"</button></div> }.into_any()
+                                view! { <div class="permission-action-row"><button class="primary-button" disabled=move || busy.get() on:click=request_permission>{move || if busy.get() { "Opening macOS…" } else if state.get().needs_settings() { "Fix permission" } else { "Request access" }}</button><button class="text-button" disabled=move || busy.get() on:click=move |_| advance(())>"Skip for now"</button></div> }.into_any()
                             }}
                             <p class="onboarding-footnote step-footnote"><span class="status-mark" aria-hidden="true">"•"</span>"You can change this any time in Settings."</p>
                         </div>
@@ -485,23 +460,31 @@ fn status_symbol(state: PermissionState, busy: bool) -> &'static str {
     }
 }
 
-fn status_detail(state: PermissionState, busy: bool) -> &'static str {
+fn status_detail(
+    state: PermissionState,
+    busy: bool,
+    capability: PermissionCapability,
+) -> &'static str {
     if busy || state == PermissionState::Requesting {
-        "Waiting for the macOS permission sheet"
-    } else {
-        match state {
-            PermissionState::Granted => "Nothing is active until you explicitly start it",
-            PermissionState::RestartRequired => {
-                "The grant is recorded — restart Stalky to apply it"
+        return "Waiting for the macOS permission sheet";
+    }
+    match state {
+        PermissionState::Granted => "Nothing is active until you explicitly start it",
+        PermissionState::RestartRequired => "The grant is recorded — restart Stalky to apply it",
+        PermissionState::Denied | PermissionState::Restricted | PermissionState::Revoked => {
+            match capability {
+                PermissionCapability::Accessibility | PermissionCapability::ScreenRecording => {
+                    "If Stalky isn't listed in the pane, drag Stalky.app from Applications into the list"
+                }
+                PermissionCapability::Microphone | PermissionCapability::LaunchAtLogin => {
+                    "Stalky will guide you through System Settings"
+                }
             }
-            PermissionState::Denied | PermissionState::Restricted | PermissionState::Revoked => {
-                "Grant it in System Settings to continue"
-            }
-            PermissionState::Unsupported => "Optional — no permission needed in this build",
-            PermissionState::NotRequested => "Stalky will ask macOS when you continue",
-            PermissionState::Unknown => "Checking the current OS status…",
-            PermissionState::Requesting => "Waiting for the macOS permission sheet",
         }
+        PermissionState::Unsupported => "Optional — no permission needed in this build",
+        PermissionState::NotRequested => "Stalky will ask macOS when you continue",
+        PermissionState::Unknown => "Checking the current OS status…",
+        PermissionState::Requesting => "Waiting for the macOS permission sheet",
     }
 }
 

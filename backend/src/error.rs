@@ -14,7 +14,7 @@ pub struct AppError {
     status: StatusCode,
     code: &'static str,
     title: &'static str,
-    detail: &'static str,
+    detail: String,
     retryable: bool,
     request_id: Option<String>,
     www_authenticate: Option<&'static str>,
@@ -28,7 +28,7 @@ struct Problem {
     status: u16,
     code: &'static str,
     title: &'static str,
-    detail: &'static str,
+    detail: String,
     retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
@@ -40,7 +40,7 @@ impl AppError {
             status: StatusCode::NOT_FOUND,
             code: "route.not_found",
             title: "Route not found",
-            detail: "The requested API route does not exist.",
+            detail: "The requested API route does not exist.".to_owned(),
             retryable: false,
             request_id: None,
             www_authenticate: None,
@@ -54,7 +54,7 @@ impl AppError {
             status: StatusCode::UNAUTHORIZED,
             code: "auth.unauthorized",
             title: "Unauthorized",
-            detail: "Valid credentials are required to access this resource.",
+            detail: "Valid credentials are required to access this resource.".to_owned(),
             retryable: false,
             request_id: None,
             www_authenticate: Some("Bearer"),
@@ -66,25 +66,25 @@ impl AppError {
             StatusCode::PAYLOAD_TOO_LARGE => (
                 "request.too_large",
                 "Payload too large",
-                "The request body exceeds the 1 MiB limit.",
+                "The request body exceeds the 1 MiB limit.".to_owned(),
                 false,
             ),
             StatusCode::TOO_MANY_REQUESTS => (
                 "rate.limited",
                 "Rate limited",
-                "Too many requests. Retry after the suggested delay.",
+                "Too many requests. Retry after the suggested delay.".to_owned(),
                 true,
             ),
             StatusCode::INTERNAL_SERVER_ERROR => (
                 "server.internal",
                 "Internal server error",
-                "An unexpected error occurred on the server.",
+                "An unexpected error occurred on the server.".to_owned(),
                 true,
             ),
             StatusCode::GATEWAY_TIMEOUT => (
                 "server.timeout",
                 "Gateway timeout",
-                "The request did not complete before the server timeout.",
+                "The request did not complete before the server timeout.".to_owned(),
                 true,
             ),
             _ => return None,
@@ -103,6 +103,88 @@ impl AppError {
     pub(crate) fn with_request_id(mut self, request_id: Option<String>) -> Self {
         self.request_id = request_id;
         self
+    }
+
+    pub fn bad_request(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::custom(
+            StatusCode::BAD_REQUEST,
+            code,
+            "Invalid request",
+            detail,
+            false,
+        )
+    }
+
+    pub fn conflict(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::custom(StatusCode::CONFLICT, code, "Conflict", detail, false)
+    }
+
+    pub fn not_implemented(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::custom(
+            StatusCode::NOT_IMPLEMENTED,
+            code,
+            "Not implemented",
+            detail,
+            false,
+        )
+    }
+
+    pub fn resource_not_found(resource: &'static str) -> Self {
+        Self::custom(
+            StatusCode::NOT_FOUND,
+            "resource.not_found",
+            "Resource not found",
+            format!("{resource} was not found."),
+            false,
+        )
+    }
+
+    pub fn storage_unavailable() -> Self {
+        Self::custom(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage.unavailable",
+            "Storage unavailable",
+            "The persistence service is temporarily unavailable.",
+            true,
+        )
+    }
+
+    pub fn service_unavailable(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::custom(
+            StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            "Service unavailable",
+            detail,
+            true,
+        )
+    }
+
+    pub fn internal() -> Self {
+        Self::custom(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server.internal",
+            "Internal server error",
+            "An unexpected error occurred on the server.",
+            true,
+        )
+    }
+
+    fn custom(
+        status: StatusCode,
+        code: &'static str,
+        title: &'static str,
+        detail: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            title,
+            detail: detail.into(),
+            retryable,
+            request_id: None,
+            www_authenticate: None,
+        }
     }
 }
 

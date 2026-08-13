@@ -9,7 +9,7 @@ use crate::tauri::{
     CaptureState, CaptureStatus, GoogleAuthStatus, OnboardingState, PermissionCapability,
     PermissionState, PermissionStatuses, capture_start, capture_status as load_capture_status,
     capture_stop, google_auth_sign_out, google_auth_status, is_available as capture_is_available,
-    onboarding_reset, permission_open_settings, permission_request, permission_statuses,
+    onboarding_reset, permission_request, permission_statuses,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,12 +344,6 @@ fn Capture(
         if permission_busy.get_untracked() {
             return;
         }
-        if screen_permission.get_untracked().needs_settings() {
-            spawn_local(async move {
-                let _ = permission_open_settings(PermissionCapability::ScreenRecording).await;
-            });
-            return;
-        }
         set_permission_busy.set(true);
         spawn_local(async move {
             if let Err(error) = permission_request(PermissionCapability::ScreenRecording).await {
@@ -362,7 +356,7 @@ fn Capture(
     view! {
         <div class="page">
             <PageHeader eyebrow="Capture" title="See only what matters." body="A bounded, privacy-filtered ScreenCaptureKit stream with explicit start and stop controls."/>
-            <div class="feature-permission-strip"><span class="status-dot" class:good=move || screen_permission.get().is_granted() aria-hidden="true"></span><span>"Screen Recording"</span><strong aria-live="polite">{move || screen_permission.get().label()}</strong><button class="text-button" disabled=move || permission_busy.get() || screen_permission.get().is_granted() on:click=request_screen_permission>{move || if screen_permission.get().needs_settings() { "Open Settings" } else if permission_busy.get() { "Waiting…" } else { "Request access" }}</button></div>
+            <div class="feature-permission-strip"><span class="status-dot" class:good=move || screen_permission.get().is_granted() aria-hidden="true"></span><span>"Screen Recording"</span><strong aria-live="polite">{move || screen_permission.get().label()}</strong><button class="text-button" disabled=move || permission_busy.get() || screen_permission.get().is_granted() on:click=request_screen_permission>{move || if permission_busy.get() { "Opening macOS…" } else if screen_permission.get().needs_settings() { "Fix permission" } else { "Request access" }}</button></div>
             <div class="feature-stage">
                 <div class="stage-toolbar">
                     <span class="live-badge">{move || if capture.get().is_running() { "LIVE" } else { "OFF" }}</span>
@@ -487,14 +481,6 @@ fn LivePermissionCard(
         if busy.get_untracked() || state.get_untracked() == PermissionState::Unsupported {
             return;
         }
-        if state.get_untracked().needs_settings() {
-            spawn_local(async move {
-                if let Err(error) = permission_open_settings(capability).await {
-                    set_message.set(Some(error));
-                }
-            });
-            return;
-        }
         set_busy.set(true);
         spawn_local(async move {
             match permission_request(capability).await {
@@ -511,7 +497,7 @@ fn LivePermissionCard(
             {move || if state.get().is_granted() || state.get() == PermissionState::Unsupported {
                 view! { <span class="permission-final-state" class:good=move || state.get().is_granted()>{move || state.get().label()}</span> }.into_any()
             } else {
-                view! { <button class="secondary-button compact-button" disabled=move || busy.get() on:click=request>{move || if busy.get() { "Waiting…" } else if state.get().needs_settings() { "Open Settings" } else { "Request access" }}</button> }.into_any()
+                view! { <button class="secondary-button compact-button" disabled=move || busy.get() on:click=request>{move || if busy.get() { "Opening macOS…" } else if state.get().needs_settings() { "Fix permission" } else { "Request access" }}</button> }.into_any()
             }}
             {move || message.get().map(|copy| view! { <span class="permission-inline-message" aria-live="polite">{copy}</span> })}
         </article>

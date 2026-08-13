@@ -1,0 +1,26 @@
+[package]
+name = "mega-audio-capture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+zeroize = "1.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", default-features = false, features = ["alloc"] }
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "AVAudioApplication",
+    "AVAudioBuffer",
+    "AVAudioEngine",
+    "AVAudioFormat",
+    "AVAudioIONode",
+    "AVAudioNode",
+    "AVAudioTime",
+    "AVAudioTypes",
+    "block2",
+] }

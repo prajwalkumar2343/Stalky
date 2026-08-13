@@ -19,21 +19,22 @@ const KEYCHAIN_SERVICE: &str = "com.stalky.desktop.memory";
 const KEYCHAIN_ACCOUNT: &str = "sqlite-key-v1";
 
 pub struct MemoryService {
-    store: Arc<Mutex<Result<MemoryStore, String>>>,
+    path: Result<PathBuf, String>,
+    store: Arc<Mutex<Option<Result<MemoryStore, String>>>>,
 }
 
 impl MemoryService {
     pub fn initialize(app: &AppHandle) -> Self {
-        let store = memory_database_path(app).and_then(open_encrypted_store);
-        if let Err(error) = &store {
-            eprintln!("Structured memory is unavailable; capture remains operational: {error}");
-        }
         Self {
-            store: Arc::new(Mutex::new(store)),
+            path: memory_database_path(app),
+            // Opening the encrypted store reads the macOS Keychain. Keep that
+            // user-visible operation lazy so launching capture-only/local
+            // workspaces never triggers a password prompt.
+            store: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn with_store<T>(
+    pub(crate) fn with_store<T>(
         &self,
         operation: impl FnOnce(&mut MemoryStore) -> Result<T, StoreError>,
     ) -> Result<T, MemoryCommandError> {
@@ -41,7 +42,17 @@ impl MemoryService {
             .store
             .lock()
             .map_err(|_| memory_unavailable("Memory storage lock is unavailable.".into()))?;
-        let store = guard
+        let store = guard.get_or_insert_with(|| {
+            self.path
+                .clone()
+                .and_then(open_encrypted_store)
+                .inspect_err(|error| {
+                    eprintln!(
+                        "Structured memory is unavailable; capture remains operational: {error}"
+                    );
+                })
+        });
+        let store = store
             .as_mut()
             .map_err(|error| memory_unavailable(error.clone()))?;
         operation(store).map_err(memory_error_from_store)
@@ -51,6 +62,7 @@ impl MemoryService {
 impl Clone for MemoryService {
     fn clone(&self) -> Self {
         Self {
+            path: self.path.clone(),
             store: Arc::clone(&self.store),
         }
     }
@@ -343,24 +355,30 @@ fn memory_database_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn open_encrypted_store(path: PathBuf) -> Result<MemoryStore, String> {
     use getrandom::fill;
     use security_framework::passwords::{get_generic_password, set_generic_password};
+    use zeroize::Zeroizing;
 
-    let bytes = match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
-        Ok(bytes) => bytes,
-        Err(error) if error.code() == -25300 => {
-            let mut generated = vec![0_u8; 32];
-            fill(&mut generated)
-                .map_err(|error| format!("could not generate a memory encryption key: {error}"))?;
-            set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &generated)
-                .map_err(|error| format!("could not store the memory key in Keychain: {error}"))?;
-            generated
-        }
-        Err(error) => {
-            return Err(format!(
-                "could not read the memory key from Keychain: {error}"
-            ));
-        }
-    };
+    let bytes = Zeroizing::new(
+        match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+            Ok(bytes) => bytes,
+            Err(error) if error.code() == -25300 => {
+                let mut generated = vec![0_u8; 32];
+                fill(&mut generated).map_err(|error| {
+                    format!("could not generate a memory encryption key: {error}")
+                })?;
+                set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &generated).map_err(
+                    |error| format!("could not store the memory key in Keychain: {error}"),
+                )?;
+                generated
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not read the memory key from Keychain: {error}"
+                ));
+            }
+        },
+    );
     let key: [u8; 32] = bytes
+        .as_slice()
         .try_into()
         .map_err(|_| "the Keychain memory key has an invalid length".to_owned())?;
     MemoryStore::open(MemoryStoreConfig::encrypted(path, key)).map_err(|error| error.to_string())

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssertionMode, ExtractionRunId, Memory, MemoryId, MemoryStatus, Sensitivity, SourceEventId,
-    ValidatedMemoryCandidate,
+    AssertionMode, ExtractionRunId, Memory, MemoryId, MemoryStatus, PrivacyRejection, Sensitivity,
+    SourceEventId, ValidatedMemoryCandidate, inspect_private_content, normalize_content,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,6 +127,10 @@ pub enum ReconciliationError {
     InvalidMatchConfidence,
     #[error("duplicate target is not active")]
     DuplicateTargetNotActive,
+    #[error("invalid mutation plan: {0}")]
+    InvalidPlan(&'static str),
+    #[error(transparent)]
+    Privacy(#[from] PrivacyRejection),
 }
 
 pub fn reconcile_candidate(
@@ -158,7 +162,7 @@ pub fn reconcile_candidate(
         if matched.memory.status != MemoryStatus::Active {
             return Err(ReconciliationError::DuplicateTargetNotActive);
         }
-        return Ok(MemoryMutationPlan::Duplicate {
+        return checked(MemoryMutationPlan::Duplicate {
             extraction_run_id: fields.extraction_run_id,
             candidate_index: fields.candidate_index,
             existing_memory_id: matched.memory.id.clone(),
@@ -171,11 +175,11 @@ pub fn reconcile_candidate(
         });
     }
 
-    let update = best_match(&input.existing_matches, CandidateRelationship::Updates)
-        .or_else(|| best_match(&input.existing_matches, CandidateRelationship::Contradicts));
+    let update = best_active_match(&input.existing_matches, CandidateRelationship::Updates)
+        .or_else(|| best_active_match(&input.existing_matches, CandidateRelationship::Contradicts));
     if let Some(matched) = update {
         if candidate.assertion_mode.trust_rank() < matched.memory.assertion_mode.trust_rank() {
-            return Ok(MemoryMutationPlan::RequestReview {
+            return checked(MemoryMutationPlan::RequestReview {
                 extraction_run_id: fields.extraction_run_id,
                 candidate_index: fields.candidate_index,
                 candidate,
@@ -183,14 +187,14 @@ pub fn reconcile_candidate(
             });
         }
         if status != MemoryStatus::Active {
-            return Ok(MemoryMutationPlan::RequestReview {
+            return checked(MemoryMutationPlan::RequestReview {
                 extraction_run_id: fields.extraction_run_id,
                 candidate_index: fields.candidate_index,
                 candidate,
                 reason: "candidate is not eligible to supersede an active memory".into(),
             });
         }
-        return Ok(MemoryMutationPlan::Update {
+        return checked(MemoryMutationPlan::Update {
             extraction_run_id: fields.extraction_run_id,
             candidate_index: fields.candidate_index,
             existing_memory_id: matched.memory.id.clone(),
@@ -199,8 +203,18 @@ pub fn reconcile_candidate(
         });
     }
 
-    if let Some(matched) = best_match(&input.existing_matches, CandidateRelationship::Extends) {
-        return Ok(MemoryMutationPlan::Extend {
+    if let Some(matched) =
+        best_active_match(&input.existing_matches, CandidateRelationship::Extends)
+    {
+        if status != MemoryStatus::Active {
+            return checked(MemoryMutationPlan::RequestReview {
+                extraction_run_id: fields.extraction_run_id,
+                candidate_index: fields.candidate_index,
+                candidate,
+                reason: "candidate is not eligible to extend an active memory".into(),
+            });
+        }
+        return checked(MemoryMutationPlan::Extend {
             extraction_run_id: fields.extraction_run_id,
             candidate_index: fields.candidate_index,
             existing_memory_id: matched.memory.id.clone(),
@@ -210,7 +224,7 @@ pub fn reconcile_candidate(
     }
 
     if status == MemoryStatus::PendingReview {
-        return Ok(MemoryMutationPlan::RequestReview {
+        return checked(MemoryMutationPlan::RequestReview {
             extraction_run_id: fields.extraction_run_id,
             candidate_index: fields.candidate_index,
             candidate,
@@ -221,7 +235,7 @@ pub fn reconcile_candidate(
         });
     }
 
-    Ok(MemoryMutationPlan::Create {
+    checked(MemoryMutationPlan::Create {
         extraction_run_id: fields.extraction_run_id,
         candidate_index: fields.candidate_index,
         candidate,
@@ -242,6 +256,151 @@ fn best_match(
         .iter()
         .filter(|matched| matched.relationship == relationship)
         .max_by(|left, right| left.confidence.total_cmp(&right.confidence))
+}
+
+fn best_active_match(
+    matches: &[ReconciliationMatch],
+    relationship: CandidateRelationship,
+) -> Option<&ReconciliationMatch> {
+    matches
+        .iter()
+        .filter(|matched| matched.memory.status == MemoryStatus::Active)
+        .filter(|matched| matched.relationship == relationship)
+        .max_by(|left, right| left.confidence.total_cmp(&right.confidence))
+}
+
+fn checked(plan: MemoryMutationPlan) -> Result<MemoryMutationPlan, ReconciliationError> {
+    validate_mutation_plan(&plan)?;
+    Ok(plan)
+}
+
+/// Validates a plan at the domain boundary before a repository applies it.
+///
+/// The repository still validates foreign-key references and transaction
+/// preconditions. This function only checks the plan's self-contained shape,
+/// scalar bounds, promotion status, and privacy policy.
+pub fn validate_mutation_plan(plan: &MemoryMutationPlan) -> Result<(), ReconciliationError> {
+    let (extraction_run_id, candidate_index) = plan.idempotency_key();
+    if extraction_run_id.as_str().trim().is_empty() {
+        return Err(ReconciliationError::InvalidPlan(
+            "extraction run id is empty",
+        ));
+    }
+    let _ = candidate_index;
+
+    match plan {
+        MemoryMutationPlan::Create {
+            candidate, status, ..
+        }
+        | MemoryMutationPlan::Update {
+            candidate, status, ..
+        }
+        | MemoryMutationPlan::Extend {
+            candidate, status, ..
+        } => {
+            if !matches!(status, MemoryStatus::Active | MemoryStatus::PendingReview) {
+                return Err(ReconciliationError::InvalidPlan(
+                    "create, update, and extend status must be active or pending_review",
+                ));
+            }
+            validate_plan_candidate(candidate)?;
+        }
+        MemoryMutationPlan::RequestReview {
+            candidate, reason, ..
+        } => {
+            validate_plan_candidate(candidate)?;
+            validate_reason(reason)?;
+        }
+        MemoryMutationPlan::Duplicate {
+            existing_memory_id,
+            source_event_ids,
+            confidence,
+            ..
+        } => {
+            if existing_memory_id.as_str().trim().is_empty() {
+                return Err(ReconciliationError::InvalidPlan(
+                    "duplicate target id is empty",
+                ));
+            }
+            if source_event_ids.len() > 20 {
+                return Err(ReconciliationError::InvalidPlan(
+                    "duplicate provenance is unbounded",
+                ));
+            }
+            validate_unit("duplicate confidence", *confidence)?;
+        }
+        MemoryMutationPlan::Ignore { reason, .. } => validate_reason(reason)?,
+    }
+    Ok(())
+}
+
+fn validate_plan_candidate(candidate: &crate::MemoryCandidate) -> Result<(), ReconciliationError> {
+    let normalized = normalize_content(&candidate.content);
+    if !(8..=500).contains(&normalized.chars().count()) {
+        return Err(ReconciliationError::InvalidPlan(
+            "candidate content length is outside 8..=500 characters",
+        ));
+    }
+    validate_unit("importance", candidate.importance)?;
+    validate_unit("confidence", candidate.confidence)?;
+    if candidate.confidence > candidate.assertion_mode.confidence_ceiling() {
+        return Err(ReconciliationError::InvalidPlan(
+            "candidate confidence exceeds its assertion-mode ceiling",
+        ));
+    }
+    if candidate.category_slugs.len() > 5 {
+        return Err(ReconciliationError::InvalidPlan(
+            "candidate has more than five categories",
+        ));
+    }
+    if candidate.assertion_mode == AssertionMode::Manual {
+        if candidate.supporting_source_event_ids.len() > 20 {
+            return Err(ReconciliationError::InvalidPlan(
+                "manual candidate provenance is unbounded",
+            ));
+        }
+    } else if !(1..=20).contains(&candidate.supporting_source_event_ids.len()) {
+        return Err(ReconciliationError::InvalidPlan(
+            "candidate provenance must contain 1..=20 source events",
+        ));
+    }
+    if candidate.scope.scope_type != crate::ScopeType::Global
+        && candidate.scope.scope_key.trim().is_empty()
+    {
+        return Err(ReconciliationError::InvalidPlan(
+            "non-global candidate scope has no key",
+        ));
+    }
+    if let (Some(from), Some(until)) = (candidate.valid_from_ms, candidate.valid_until_ms)
+        && until < from
+    {
+        return Err(ReconciliationError::InvalidPlan(
+            "candidate validity interval is reversed",
+        ));
+    }
+    inspect_private_content(
+        &normalized,
+        candidate.from_password_field,
+        candidate.assertion_mode == AssertionMode::Inferred,
+    )?;
+    Ok(())
+}
+
+fn validate_unit(field: &'static str, value: f32) -> Result<(), ReconciliationError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(ReconciliationError::InvalidPlan(field))
+    }
+}
+
+fn validate_reason(reason: &str) -> Result<(), ReconciliationError> {
+    if reason.trim().is_empty() || reason.chars().count() > 256 {
+        return Err(ReconciliationError::InvalidPlan(
+            "audit reason must contain 1..=256 characters",
+        ));
+    }
+    Ok(())
 }
 
 fn promotion_status(
@@ -403,5 +562,28 @@ mod tests {
         assert!(
             matches!(reconcile_candidate(input(validated(AssertionMode::Explicit), vec![matched])).unwrap(), MemoryMutationPlan::Duplicate { existing_memory_id, .. } if existing_memory_id == MemoryId::from("m1"))
         );
+    }
+
+    #[test]
+    fn mutation_plan_validation_rejects_unbounded_or_terminal_states() {
+        assert!(matches!(
+            validate_mutation_plan(&MemoryMutationPlan::Ignore {
+                extraction_run_id: ExtractionRunId::from("run"),
+                candidate_index: 0,
+                reason: " ".into(),
+            }),
+            Err(ReconciliationError::InvalidPlan(_))
+        ));
+
+        let plan = MemoryMutationPlan::Create {
+            extraction_run_id: ExtractionRunId::from("run"),
+            candidate_index: 0,
+            candidate: validated(AssertionMode::Explicit).into_candidate(),
+            status: MemoryStatus::Superseded,
+        };
+        assert!(matches!(
+            validate_mutation_plan(&plan),
+            Err(ReconciliationError::InvalidPlan(_))
+        ));
     }
 }

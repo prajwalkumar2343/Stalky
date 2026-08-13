@@ -157,6 +157,9 @@ fn require_hud_window(window: &WebviewWindow) -> Result<(), String> {
 }
 
 fn apply_material(window: &WebviewWindow, presentation: HudPresentation) -> Result<(), String> {
+    if material_backend(native_glass_available()) == MaterialBackend::NativeGlass {
+        return install_native_glass(window);
+    }
     window
         .set_effects(
             EffectsBuilder::new()
@@ -166,6 +169,76 @@ fn apply_material(window: &WebviewWindow, presentation: HudPresentation) -> Resu
                 .build(),
         )
         .map_err(|error| format!("could not apply the Stalky glass material: {error}"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaterialBackend {
+    NativeGlass,
+    HudMaterial,
+}
+
+const fn material_backend(native_glass_available: bool) -> MaterialBackend {
+    if native_glass_available {
+        MaterialBackend::NativeGlass
+    } else {
+        MaterialBackend::HudMaterial
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_glass_available() -> bool {
+    use objc2::runtime::AnyClass;
+
+    AnyClass::get(c"NSGlassEffectView").is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn native_glass_available() -> bool {
+    false
+}
+
+/// Reparents the transparent WKWebView into AppKit's adaptive glass container.
+/// The class is resolved at runtime so builds made with an older SDK retain the
+/// documented HUD-material fallback on macOS versions before Liquid Glass.
+#[cfg(target_os = "macos")]
+fn install_native_glass(window: &WebviewWindow) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    let glass_class = AnyClass::get(c"NSGlassEffectView")
+        .ok_or_else(|| "native Liquid Glass is unavailable".to_owned())?;
+    let window_ptr = window
+        .ns_window()
+        .map_err(|error| format!("could not access the Stalky glance window: {error}"))?
+        .cast::<AnyObject>();
+    // SAFETY: Tauri returns the live NSWindow for this WebviewWindow. This
+    // function runs during setup on the main thread. AppKit retains both the
+    // installed content view and the previous content assigned to the glass.
+    unsafe {
+        let native_window = window_ptr
+            .as_ref()
+            .ok_or_else(|| "Stalky returned an empty native window handle".to_owned())?;
+        let content: *mut AnyObject = msg_send![native_window, contentView];
+        let content = content
+            .as_ref()
+            .ok_or_else(|| "Stalky glance does not have a native content view".to_owned())?;
+        let already_glass: Bool = msg_send![content, isKindOfClass: glass_class];
+        if already_glass.as_bool() {
+            return Ok(());
+        }
+
+        let glass: Retained<AnyObject> = msg_send![glass_class, new];
+        let _: () = msg_send![&*glass, setCornerRadius: 18.0_f64];
+        let _: () = msg_send![&*glass, setContentView: content];
+        let _: () = msg_send![native_window, setContentView: &*glass];
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_native_glass(_window: &WebviewWindow) -> Result<(), String> {
+    Err("native Liquid Glass is only available on macOS".to_owned())
 }
 
 fn monitor_for_anchor(
@@ -258,7 +331,7 @@ fn anchor_from_position(position: PhysicalPosition<i32>, size: PhysicalSize<u32>
 mod tests {
     use tauri::{PhysicalPosition, PhysicalSize};
 
-    use super::{HudAnchor, anchor_from_position};
+    use super::{HudAnchor, MaterialBackend, anchor_from_position, material_backend};
 
     #[test]
     fn anchor_tracks_the_stable_top_right_corner() {
@@ -276,5 +349,11 @@ mod tests {
                 top: 64,
             }
         );
+    }
+
+    #[test]
+    fn native_glass_has_a_deterministic_material_fallback() {
+        assert_eq!(material_backend(true), MaterialBackend::NativeGlass);
+        assert_eq!(material_backend(false), MaterialBackend::HudMaterial);
     }
 }

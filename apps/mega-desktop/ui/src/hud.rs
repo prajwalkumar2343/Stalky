@@ -2,6 +2,7 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use crate::glass::GlassSurface;
 use crate::tauri::{
     CaptureState, CaptureStatus, OnboardingState, capture_start, capture_status, capture_stop,
     hud_open_main, is_available, onboarding_state,
@@ -84,6 +85,7 @@ pub fn Hud() -> impl IntoView {
             aria-live="polite"
         >
             <div class="glance-pill" data-tauri-drag-region="true">
+                <GlassSurface />
                 <button class="glance-open" aria-label="Open Stalky" on:click=move |_| open_main.run(())>
                     <span class="glance-mark" aria-hidden="true"><StalkyGlyph /></span>
                     <span class="glance-copy">

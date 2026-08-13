@@ -2,10 +2,12 @@ openapi: 3.1.0
 info:
   title: Stalky Backend API
   version: 0.1.0
-  summary: Authenticated identity API for the Stalky desktop app.
+  summary: Authenticated application API for Stalky and the Aura compatibility client.
   description: |
-    Minimal authenticated surface of the Stalky backend. It exposes liveness and
-    readiness probes plus an authenticated identity endpoint, `GET /v1/me`.
+    The versioned Rust/Axum application API. It exposes authenticated tenant-scoped
+    profiles, memories, todos, mini-app records, and durable assistant-run admission
+    and cancellation. The legacy Android client can continue using the equivalent
+    `/api/*` paths while it migrates to `/v1/*`.
 
     Authentication is a Supabase-issued JWT sent as `Authorization: Bearer <token>`.
     The backend validates ES256 or RS256 tokens against the Supabase project's
@@ -14,9 +16,12 @@ info:
     Faults are returned as `application/problem+json` bodies that follow RFC 9457
     plus the Stalky extension members `code`, `retryable`, and `requestId`.
 
-    This contract intentionally contains no mutation endpoints. Upload/sync,
-    remote transcription, and agent/automation APIs are out of scope and are not
-    described here until a later, separately approved unit.
+    Assistant chat is implemented by Rust provider adapters for Gemini, OpenAI
+    Responses, and OpenRouter chat completions. It requires a configured
+    server-side credential vault and never persists a raw provider key. Mini-app
+    generation, model discovery, and transcription remain explicit `501 Not
+    Implemented` compatibility routes. Database persistence is selected by
+    `DATABASE_URL`; the test surface uses an in-memory fake with the same store trait.
   contact:
     name: Stalky maintainers
   license:
@@ -33,6 +38,10 @@ tags:
     description: Liveness and readiness probes used by load balancers and orchestrators.
   - name: Identity
     description: Authenticated caller identity operations.
+  - name: Application state
+    description: Tenant-scoped durable application resources.
+  - name: Assistant runs
+    description: Durable queued assistant-run state and ordered events.
 
 paths:
   /health/live:
@@ -129,6 +138,276 @@ paths:
         "504":
           $ref: "#/components/responses/GatewayTimeout"
 
+  /v1/profile:
+    get:
+      operationId: getProfile
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: The caller's profile, created lazily when first read.
+          content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    patch:
+      operationId: updateProfile
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/ProfilePatch"}}}
+      responses:
+        "200":
+          description: Updated profile.
+          content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /v1/memories:
+    get:
+      operationId: listMemories
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: The caller's memories, newest first.
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Memory"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      operationId: createMemory
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/MemoryCreate"}}}
+      responses:
+        "200":
+          description: Created memory.
+          content: {application/json: {schema: {$ref: "#/components/schemas/Memory"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /v1/memories/search:
+    post:
+      operationId: searchMemories
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/MemorySearchRequest"}}}
+      responses:
+        "200":
+          description: Simple tenant-scoped memory matches.
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/MemorySearchResult"}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /v1/memories/{memory_id}:
+    delete:
+      operationId: deleteMemory
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters: [{name: memory_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200":
+          description: Memory deleted.
+          content: {application/json: {schema: {$ref: "#/components/schemas/OkResponse"}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+
+  /v1/todos:
+    get:
+      operationId: listTodos
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: The caller's todos, newest first.
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Todo"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      operationId: createTodo
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/TodoCreate"}}}
+      responses:
+        "200":
+          description: Created todo.
+          content: {application/json: {schema: {$ref: "#/components/schemas/Todo"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /v1/todos/{todo_id}:
+    patch:
+      operationId: updateTodo
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters: [{name: todo_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/TodoUpdate"}}}
+      responses:
+        "200":
+          description: Updated todo.
+          content: {application/json: {schema: {$ref: "#/components/schemas/Todo"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+    delete:
+      operationId: deleteTodo
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters: [{name: todo_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200":
+          description: Todo deleted.
+          content: {application/json: {schema: {$ref: "#/components/schemas/OkResponse"}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+
+  /v1/mini-apps/{mini_app_id}/records:
+    get:
+      operationId: listMiniAppRecords
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: mini_app_id, in: path, required: true, schema: {type: string, maxLength: 120}}
+        - {name: recordType, in: query, required: false, schema: {type: string, maxLength: 80}}
+      responses:
+        "200":
+          description: Scalar mini-app records, newest first.
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/MiniAppRecord"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      operationId: createMiniAppRecord
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters: [{name: mini_app_id, in: path, required: true, schema: {type: string, maxLength: 120}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/MiniAppRecordCreate"}}}
+      responses:
+        "200":
+          description: Created record.
+          content: {application/json: {schema: {$ref: "#/components/schemas/MiniAppRecord"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /v1/mini-apps/{mini_app_id}/records/{record_id}:
+    patch:
+      operationId: updateMiniAppRecord
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: mini_app_id, in: path, required: true, schema: {type: string, maxLength: 120}}
+        - {name: record_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/MiniAppRecordUpdate"}}}
+      responses:
+        "200":
+          description: Updated record.
+          content: {application/json: {schema: {$ref: "#/components/schemas/MiniAppRecord"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+    delete:
+      operationId: deleteMiniAppRecord
+      tags: [Application state]
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: mini_app_id, in: path, required: true, schema: {type: string, maxLength: 120}}
+        - {name: record_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Record deleted.
+          content: {application/json: {schema: {$ref: "#/components/schemas/OkResponse"}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+
+  /v1/assistant/runs:
+    post:
+      operationId: createAssistantRun
+      tags: [Assistant runs]
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: {type: string, minLength: 1, maxLength: 200}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/AgentRunRequest"}}}
+      responses:
+        "202":
+          description: Run admitted to the durable queue.
+          content: {application/json: {schema: {$ref: "#/components/schemas/AgentRunAccepted"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/Conflict"}
+
+  /v1/assistant/runs/{run_id}:
+    get:
+      operationId: getAssistantRun
+      tags: [Assistant runs]
+      security: [{bearerAuth: []}]
+      parameters: [{name: run_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200":
+          description: Durable run snapshot.
+          content: {application/json: {schema: {$ref: "#/components/schemas/AgentRunSnapshot"}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+
+  /v1/assistant/runs/{run_id}/cancel:
+    post:
+      operationId: cancelAssistantRun
+      tags: [Assistant runs]
+      security: [{bearerAuth: []}]
+      parameters: [{name: run_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200":
+          description: Current run snapshot after an idempotent cancellation request.
+          content: {application/json: {schema: {$ref: "#/components/schemas/AgentRunSnapshot"}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+
+  /v1/assistant/runs/{run_id}/events:
+    get:
+      operationId: listAssistantRunEvents
+      tags: [Assistant runs]
+      security: [{bearerAuth: []}]
+      parameters: [{name: run_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200":
+          description: Ordered durable run events.
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/AgentRunEvent"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/ResourceNotFound"}
+
+  /v1/assistant/chat:
+    post:
+      operationId: assistantChat
+      summary: Complete one provider-backed assistant turn
+      description: |
+        Executes one provider turn through the Rust adapter registry. The
+        request credential is encrypted and opened only for the upstream call;
+        it is never returned or written to the run request payload. This route
+        does not create a durable run. Use `/assistant/runs` for queued work.
+      tags: [Assistant runs]
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/AgentRunRequest"}}}
+      responses:
+        "200":
+          description: Provider response normalized to the Aura assistant shape.
+          content: {application/json: {schema: {$ref: "#/components/schemas/AssistantChatResponse"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
+
 components:
   securitySchemes:
     bearerAuth:
@@ -161,6 +440,33 @@ components:
         format: uuid
 
   responses:
+    BadRequest:
+      description: The request failed boundary validation.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: The idempotency key conflicts with an earlier request.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ResourceNotFound:
+      description: The requested tenant-scoped resource does not exist.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     Unauthorized:
       description: The Bearer token is missing, expired, malformed, or its signature was rejected.
       headers:
@@ -178,6 +484,16 @@ components:
             detail: Valid credentials are required to access this resource.
             retryable: false
             requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
+
+    ServiceUnavailable:
+      description: The provider or credential service is unavailable.
+      headers:
+        x-request-id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
 
     RouteNotFound:
       description: The requested API route does not exist.
@@ -275,6 +591,174 @@ components:
             requestId: 3f7c2b9a-4e11-4a7e-9f6f-1a3db07591d0
 
   schemas:
+    Profile:
+      type: object
+      required: [id, displayName, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        displayName: {type: string, maxLength: 120}
+        avatarUrl: {type: [string, "null"], maxLength: 2048}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    ProfilePatch:
+      type: object
+      properties:
+        displayName: {type: string, maxLength: 120}
+        avatarUrl: {type: string, maxLength: 2048}
+
+    MemoryCreate:
+      type: object
+      required: [title, content]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 240}
+        content: {type: string, minLength: 1, maxLength: 8000}
+
+    Memory:
+      allOf:
+        - $ref: "#/components/schemas/MemoryCreate"
+        - type: object
+          required: [id, created_at]
+          properties:
+            id: {type: string, format: uuid}
+            created_at: {type: string, format: date-time}
+
+    MemorySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: {type: string, minLength: 1, maxLength: 8000}
+        limit: {type: integer, minimum: 1, maximum: 50, default: 8}
+
+    MemorySearchResult:
+      type: object
+      required: [memory_id, title, chunk_text, score, source_type]
+      properties:
+        memory_id: {type: string, format: uuid}
+        title: {type: string}
+        chunk_text: {type: string}
+        score: {type: number, format: float}
+        source_type: {type: string, const: memory}
+
+    TodoCreate:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 500}
+
+    TodoUpdate:
+      type: object
+      properties:
+        title: {type: [string, "null"], maxLength: 500}
+        done: {type: [boolean, "null"]}
+
+    Todo:
+      allOf:
+        - $ref: "#/components/schemas/TodoCreate"
+        - type: object
+          required: [id, done, created_at]
+          properties:
+            id: {type: string, format: uuid}
+            done: {type: boolean}
+            created_at: {type: string, format: date-time}
+
+    Scalar:
+      nullable: true
+      oneOf:
+        - {type: string, maxLength: 4000}
+        - {type: number}
+        - {type: boolean}
+
+    MiniAppRecordCreate:
+      type: object
+      properties:
+        recordType: {type: string, minLength: 1, maxLength: 80, default: record}
+        values: {type: object, additionalProperties: {$ref: "#/components/schemas/Scalar"}, maxProperties: 60}
+
+    MiniAppRecordUpdate:
+      type: object
+      properties:
+        values: {type: object, additionalProperties: {$ref: "#/components/schemas/Scalar"}, maxProperties: 60}
+
+    MiniAppRecord:
+      type: object
+      required: [id, miniAppId, recordType, values, createdAt, updatedAt]
+      properties:
+        id: {type: string, format: uuid}
+        miniAppId: {type: string, maxLength: 120}
+        recordType: {type: string, maxLength: 80}
+        values: {type: object, additionalProperties: {$ref: "#/components/schemas/Scalar"}}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+
+    AgentRunRequest:
+      type: object
+      required: [message]
+      properties:
+        message: {type: string, maxLength: 12000}
+        session_id: {type: [string, "null"], maxLength: 200}
+        provider: {type: string, default: gemini}
+        api_key: {type: string, writeOnly: true, maxLength: 1024}
+        model: {type: string, maxLength: 200}
+        memories: {type: array, items: {}}
+        todos: {type: array, items: {}}
+        apps: {type: array, items: {}}
+        mini_apps: {type: array, items: {}}
+        automations: {type: array, items: {}}
+        context_files: {type: array, items: {type: string}}
+        image_base64: {type: [string, "null"], maxLength: 8000000, writeOnly: true}
+        image_mime_type: {type: [string, "null"], maxLength: 100}
+
+    AgentRunAccepted:
+      type: object
+      required: [run_id, session_id, state]
+      properties:
+        run_id: {type: string, format: uuid}
+        session_id: {type: string, format: uuid}
+        state: {type: string, enum: [queued, running, completed, failed, interrupted, cancelled]}
+
+    AgentRunSnapshot:
+      type: object
+      required: [id, session_id, state, phase, emotion, actions, children, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        session_id: {type: string, format: uuid}
+        state: {type: string, enum: [queued, running, completed, failed, interrupted, cancelled]}
+        phase: {type: string, enum: [admitted, planning, delegating, synthesizing, completed, failed, interrupted, cancelled]}
+        reply: {type: [string, "null"]}
+        emotion: {type: string}
+        created_emotion: {type: [string, "null"]}
+        actions: {type: array, items: {}}
+        children: {type: array, items: {}}
+        error: {type: [string, "null"]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    AgentRunEvent:
+      type: object
+      required: [sequence, event_type, payload, created_at]
+      properties:
+        sequence: {type: integer, format: int64, minimum: 0}
+        event_type: {type: string}
+        payload: {type: object}
+        created_at: {type: string, format: date-time}
+
+    AssistantChatResponse:
+      type: object
+      required: [reply, session_id, emotion, actions]
+      properties:
+        reply: {type: string}
+        session_id: {type: string, format: uuid}
+        emotion: {type: string}
+        created_emotion: {type: [string, "null"]}
+        actions: {type: array, items: {}}
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean, const: true}
+
     Health:
       type: object
       description: Minimal health payload returned by the probes.

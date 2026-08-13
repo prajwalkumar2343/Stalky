@@ -50,68 +50,73 @@ pub(crate) fn permission_status(
 /// Screen Recording trust for the current process, distinguishing grants that
 /// still need a relaunch and grants that were revoked after the app started.
 ///
-/// `CGPreflightScreenCaptureAccess` answers from the SkyLight cache recorded
-/// when this process last requested permission, so it goes stale in both
-/// directions. The private `TCCAccessPreflight` call asks tccd at call time:
-/// a live grant with a stale cached denial means the app must restart before
-/// capture works, and a live denial with a cached grant is a lapsed or
-/// revoked permission.
+/// Public Screen Recording trust for the current process.
+///
+/// A successful capture start remains the authoritative runtime signal. This
+/// passive status query deliberately uses only Apple's supported preflight API;
+/// production builds must not load or call the private TCC framework.
 fn screen_recording_permission_state() -> PermissionState {
-    let cached = CGPreflightScreenCaptureAccess();
-    match live_screen_recording_preflight() {
-        Some(live) if live && cached => PermissionState::Granted,
-        Some(live) if live && !cached => PermissionState::RestartRequired,
-        Some(live) if !live && cached => PermissionState::Revoked,
-        _ => PermissionState::Denied,
-    }
+    normalize_boolean_permission(CGPreflightScreenCaptureAccess())
 }
 
-/// Asks tccd directly for the current Screen Recording verdict via the
-/// private TCC framework, bypassing the SkyLight cache used by
-/// `CGPreflightScreenCaptureAccess`. Side-effect free: this is a preflight,
-/// not a request. `None` means the probe could not be performed.
-fn live_screen_recording_preflight() -> Option<bool> {
-    type TccAccessPreflight = unsafe extern "C" fn(*const c_void) -> u32;
-    const TCC_FRAMEWORK: &[u8] = b"/System/Library/PrivateFrameworks/TCC.framework/TCC\0";
-    const PREFLIGHT_SYMBOL: &[u8] = b"TCCAccessPreflight\0";
-    const SCREEN_CAPTURE_SERVICE_SYMBOL: &[u8] = b"kTCCServiceScreenCapture\0";
-    const TCC_PREFLIGHT_GRANTED: u32 = 0;
+/// One-shot ScreenCaptureKit enumeration used as a live capture probe.
+///
+/// `SCShareableContent.current` requires Screen Recording permission to
+/// succeed: without it, ScreenCaptureKit fails the request with its
+/// permission-denied error, and with it the enumeration completes. The probe
+/// never starts a stream, so it has no side effects beyond a brief
+/// enumeration, and it reports the strongest possible evidence: can capture
+/// start right now?
+fn screen_capture_probe() -> bool {
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    // SAFETY: dlopen/dlsym load the private TCC preflight entry point. The
-    // function pointer is called with the kTCCServiceScreenCapture service
-    // constant, matching how the public preflight helpers are implemented.
-    unsafe {
-        let handle = libc::dlopen(
-            TCC_FRAMEWORK.as_ptr().cast(),
-            libc::RTLD_LAZY | libc::RTLD_LOCAL,
-        );
-        if handle.is_null() {
-            return None;
-        }
-        let preflight_symbol = libc::dlsym(handle, PREFLIGHT_SYMBOL.as_ptr().cast());
-        let service_symbol = libc::dlsym(handle, SCREEN_CAPTURE_SERVICE_SYMBOL.as_ptr().cast());
-        if preflight_symbol.is_null() || service_symbol.is_null() {
-            libc::dlclose(handle);
-            return None;
-        }
-        let preflight: TccAccessPreflight = std::mem::transmute(preflight_symbol);
-        let service = *(service_symbol as *const *const c_void);
-        let granted = preflight(service) == TCC_PREFLIGHT_GRANTED;
-        libc::dlclose(handle);
-        Some(granted)
-    }
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2_foundation::NSError;
+    use objc2_screen_capture_kit::SCShareableContent;
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let completion: RcBlock<dyn Fn(*mut SCShareableContent, *mut NSError)> = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            let succeeded = if let Some(content) = unsafe { content.as_ref() } {
+                // SAFETY: ScreenCaptureKit owns the block for the duration of
+                // the call; the content object is retained only to keep it
+                // alive until the probe verdict is delivered.
+                unsafe { Retained::retain(content as *const _ as *mut SCShareableContent) }
+                    .is_some()
+            } else {
+                if let Some(error) = unsafe { error.as_ref() } {
+                    eprintln!(
+                        "Stalky screen capture probe failed: {}",
+                        error.localizedDescription()
+                    );
+                }
+                false
+            };
+            let _ = sender.send(succeeded);
+        },
+    );
+    // SAFETY: The completion block is heap-backed and remains alive for the
+    // duration of the Objective-C asynchronous request.
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&completion) };
+    receiver.recv_timeout(PROBE_TIMEOUT).unwrap_or(false)
 }
 
 /// Live Accessibility trust for the current process.
 ///
 /// `AXIsProcessTrusted` caches its answer in-process on recent macOS
 /// versions, so a grant made in System Settings while Stalky is running keeps
-/// reading as denied until relaunch. An active `CGEventTap` can only be
-/// created when tccd grants accessibility at call time; the tap is disabled
-/// and released before it is ever attached to a run loop, so it never sits in
-/// the event path. This enrolls the app in the Accessibility pane and can
-/// surface the system prompt, so it must only be called while the user is
-/// actively being asked for the permission, never from passive polling.
+/// reading as denied until relaunch. Any of the following live signals is
+/// accepted as granted:
+///
+/// - `AXIsProcessTrusted` — the in-process cache (true after a prompt grant
+///   or a relaunch);
+/// - an active event tap — only creatable when tccd grants Accessibility at
+///   call time.
+///
+/// Creating an active tap can surface the system prompt and enroll the app in
+/// the Accessibility pane, so this probe must only be called while the user
+/// is actively being asked for the permission, never from passive polling.
 pub(crate) fn accessibility_permission_status_live() -> PermissionState {
     if unsafe { AXIsProcessTrusted() } || event_tap_probe() {
         PermissionState::Granted
@@ -180,11 +185,16 @@ pub(crate) fn request_permission(
 ) -> Result<PermissionState, PlatformError> {
     match capability {
         PermissionCapability::ScreenRecording => {
-            // CGRequestScreenCaptureAccess is the explicit native request. A
-            // subsequent comparison of the cached preflight against live TCC
-            // remains the source of truth for the result.
-            let _ = CGRequestScreenCaptureAccess();
-            Ok(screen_recording_permission_state())
+            let granted = CGRequestScreenCaptureAccess();
+            if !granted {
+                return Ok(PermissionState::Denied);
+            }
+            let observed = screen_recording_permission_state();
+            Ok(if observed.is_granted() {
+                observed
+            } else {
+                PermissionState::RestartRequired
+            })
         }
         PermissionCapability::Microphone => {
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -211,6 +221,40 @@ pub(crate) fn request_permission(
                     unreachable!()
                 }
             }))
+        }
+    }
+}
+
+#[doc(hidden)]
+pub mod diagnostics {
+    use super::*;
+
+    /// Raw probe values for the current process, used by the `probe` example
+    /// to verify what macOS reports for the app's own code identity.
+    pub struct ProbeDiagnostics {
+        pub ax_is_process_trusted: bool,
+        pub event_tap_probe: bool,
+        pub cg_preflight_screen: bool,
+        pub sck_probe: bool,
+        pub screen_state: PermissionState,
+        pub accessibility_live_state: PermissionState,
+        pub microphone_state: PermissionState,
+    }
+
+    impl ProbeDiagnostics {
+        pub fn capture() -> Self {
+            let cg_preflight_screen = CGPreflightScreenCaptureAccess();
+            let sck_probe = cg_preflight_screen && screen_capture_probe();
+            Self {
+                ax_is_process_trusted: unsafe { AXIsProcessTrusted() },
+                event_tap_probe: event_tap_probe(),
+                cg_preflight_screen,
+                sck_probe,
+                screen_state: screen_recording_permission_state(),
+                accessibility_live_state: accessibility_permission_status_live(),
+                microphone_state: super::permission_status(PermissionCapability::Microphone)
+                    .unwrap_or(PermissionState::Unknown),
+            }
         }
     }
 }

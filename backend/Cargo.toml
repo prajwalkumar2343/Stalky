@@ -6,19 +6,28 @@ publish.workspace = true
 
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
+aes-gcm = "=0.10.3"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
 http = "1"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+sqlx-core = { version = "=0.8.0", default-features = false, features = ["_rt-tokio", "_tls-rustls", "chrono", "json", "uuid"] }
+sqlx-postgres = { version = "=0.8.0", default-features = false, features = ["chrono", "uuid"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }
+tokio-util = "0.7"
 tower = { version = "0.5", features = ["timeout"] }
 tower-http = { version = "0.6", features = ["catch-panic", "limit", "request-id", "sensitive-headers", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
-uuid = "1"
+uuid.workspace = true
+zeroize = "1"
 
 [dev-dependencies]
 http-body-util = "0.1"

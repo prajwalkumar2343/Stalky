@@ -40,6 +40,8 @@ pub enum CaptureError {
     },
     #[error("frame {status:?} was rejected: {reason}")]
     InvalidFrame { status: FrameStatus, reason: String },
+    #[error("frame provenance is incomplete")]
+    InvalidProvenance,
     #[error("stream for {capture_source} stopped with error: {message}")]
     StreamStopped {
         capture_source: String,

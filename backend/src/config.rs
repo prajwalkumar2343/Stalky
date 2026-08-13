@@ -9,6 +9,7 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
 pub struct Config {
     pub bind_address: SocketAddr,
     pub supabase_url: Url,
+    pub database_url: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -23,6 +24,8 @@ pub enum ConfigError {
     InsecureSupabaseUrl,
     #[error("SUPABASE_URL must be a base URL without credentials, path, query, or fragment")]
     InvalidSupabaseBaseUrl,
+    #[error("DATABASE_URL must use the postgres or postgresql scheme")]
+    InvalidDatabaseUrl,
 }
 
 impl Config {
@@ -41,10 +44,20 @@ impl Config {
             .parse::<Url>()
             .map_err(|_| ConfigError::InvalidSupabaseUrl)?;
         validate_supabase_url(&supabase_url)?;
+        let database_url = values
+            .get("DATABASE_URL")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if database_url.as_deref().is_some_and(|value| {
+            !value.starts_with("postgres://") && !value.starts_with("postgresql://")
+        }) {
+            return Err(ConfigError::InvalidDatabaseUrl);
+        }
 
         Ok(Self {
             bind_address,
             supabase_url,
+            database_url,
         })
     }
 }
@@ -106,6 +119,26 @@ mod tests {
         assert_eq!(
             Config::from_values(values("https://example.supabase.co/other")).unwrap_err(),
             ConfigError::InvalidSupabaseBaseUrl
+        );
+    }
+
+    #[test]
+    fn accepts_an_optional_postgres_database_url() {
+        let mut values = values("https://example.supabase.co");
+        values.insert(
+            "DATABASE_URL".to_owned(),
+            "postgresql://postgres:secret@db.example.test/postgres".to_owned(),
+        );
+        assert!(Config::from_values(values).unwrap().database_url.is_some());
+    }
+
+    #[test]
+    fn rejects_an_invalid_database_url_scheme() {
+        let mut values = values("https://example.supabase.co");
+        values.insert("DATABASE_URL".to_owned(), "https://example.test".to_owned());
+        assert_eq!(
+            Config::from_values(values).unwrap_err(),
+            ConfigError::InvalidDatabaseUrl
         );
     }
 }
