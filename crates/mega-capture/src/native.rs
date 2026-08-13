@@ -49,6 +49,7 @@ impl CaptureBackend for NativeBackend {
         &self,
         source: CaptureSource,
         events: Arc<dyn CaptureEvents>,
+        stream_generation: u64,
     ) -> Result<Box<dyn CaptureSession>, CaptureError> {
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let (commands, command_receiver) = mpsc::sync_channel(1);
@@ -56,7 +57,13 @@ impl CaptureBackend for NativeBackend {
         let control = thread::Builder::new()
             .name("stalky-capture-control".to_owned())
             .spawn(move || {
-                native_control_thread(control_source, events, command_receiver, startup_sender)
+                native_control_thread(
+                    control_source,
+                    events,
+                    stream_generation,
+                    command_receiver,
+                    startup_sender,
+                )
             })
             .map_err(|error| CaptureError::StreamStart {
                 capture_source: source.to_string(),
@@ -146,10 +153,11 @@ enum NativeCommand {
 fn native_control_thread(
     source: CaptureSource,
     events: Arc<dyn CaptureEvents>,
+    stream_generation: u64,
     commands: mpsc::Receiver<NativeCommand>,
     startup_sender: mpsc::SyncSender<Result<(), CaptureError>>,
 ) -> Result<(), String> {
-    let mut runtime = match setup_native_runtime(source, events) {
+    let mut runtime = match setup_native_runtime(source, events, stream_generation) {
         Ok(runtime) => runtime,
         Err(error) => {
             let _ = startup_sender.send(Err(error));
@@ -228,6 +236,7 @@ impl Drop for NativeRuntime {
 fn setup_native_runtime(
     source: CaptureSource,
     events: Arc<dyn CaptureEvents>,
+    stream_generation: u64,
 ) -> Result<NativeRuntime, CaptureError> {
     let platform = MacOsPlatform::new();
     let permission = platform
@@ -278,7 +287,13 @@ fn setup_native_runtime(
     }
 
     let inbox = Arc::new(NativeFrameInbox::default());
-    let worker = spawn_frame_worker(Arc::clone(&inbox), Arc::clone(&events), &source)?;
+    let provenance = crate::FrameProvenance {
+        source,
+        stable_source_id: display_id,
+        stream_generation,
+        sequence: 0,
+    };
+    let worker = spawn_frame_worker(Arc::clone(&inbox), Arc::clone(&events), &source, provenance)?;
     let callbacks = NativeCallbacks::new(CallbackIvars {
         inbox: Arc::clone(&inbox),
         events,
@@ -425,10 +440,11 @@ fn spawn_frame_worker(
     inbox: Arc<NativeFrameInbox>,
     events: Arc<dyn CaptureEvents>,
     source: &CaptureSource,
+    provenance: crate::FrameProvenance,
 ) -> Result<JoinHandle<()>, CaptureError> {
     thread::Builder::new()
         .name("stalky-capture-frame-worker".to_owned())
-        .spawn(move || frame_worker(inbox, events))
+        .spawn(move || frame_worker(inbox, events, provenance))
         .map_err(|error| CaptureError::StreamStart {
             capture_source: source.to_string(),
             message: format!("could not create frame worker: {error}"),
@@ -623,8 +639,13 @@ struct CapturedFrame {
     data: Vec<u8>,
 }
 
-fn frame_worker(inbox: Arc<NativeFrameInbox>, events: Arc<dyn CaptureEvents>) {
+fn frame_worker(
+    inbox: Arc<NativeFrameInbox>,
+    events: Arc<dyn CaptureEvents>,
+    mut provenance: crate::FrameProvenance,
+) {
     while let Some(frame) = inbox.take() {
+        provenance.sequence = provenance.sequence.saturating_add(1);
         events.ingest_owned(crate::BgraFrame {
             metadata: crate::FrameMetadata {
                 width: frame.width,
@@ -634,7 +655,8 @@ fn frame_worker(inbox: Arc<NativeFrameInbox>, events: Arc<dyn CaptureEvents>) {
                 timestamp_millis: frame.timestamp_millis,
             },
             bytes: frame.data,
-            digest: 0,
+            provenance,
+            digest: crate::FrameDigest([0; 32]),
         });
     }
 }

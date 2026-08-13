@@ -40,6 +40,7 @@ pub(crate) trait CaptureBackend: Send + Sync {
         &self,
         source: CaptureSource,
         events: Arc<dyn CaptureEvents>,
+        stream_generation: u64,
     ) -> Result<Box<dyn CaptureSession>, CaptureError>;
 }
 
@@ -50,6 +51,7 @@ struct ServiceInner {
     session: Option<Box<dyn CaptureSession>>,
     last_error: Option<String>,
     callback_drops: Arc<AtomicU64>,
+    stream_generation: u64,
 }
 
 struct ServiceEvents {
@@ -154,6 +156,7 @@ impl CaptureService {
                 session: None,
                 last_error: None,
                 callback_drops: Arc::new(AtomicU64::new(0)),
+                stream_generation: 0,
             })),
             backend: Arc::new(crate::platform_backend()),
             lifecycle: Arc::new(Mutex::new(())),
@@ -181,6 +184,7 @@ impl CaptureService {
                     inner.source = Some(source);
                     inner.last_error = None;
                     inner.callback_drops = Arc::new(AtomicU64::new(0));
+                    inner.stream_generation = inner.stream_generation.saturating_add(1).max(1);
                     callback_drops = Arc::clone(&inner.callback_drops);
                 }
                 CaptureState::Running | CaptureState::Starting => {
@@ -195,7 +199,14 @@ impl CaptureService {
             callback_drops,
         });
 
-        let session = match self.backend.start(source, events) {
+        let stream_generation = self
+            .inner
+            .lock()
+            .map_err(|_| CaptureError::InvalidStartState {
+                state: CaptureState::Failed,
+            })?
+            .stream_generation;
+        let session = match self.backend.start(source, events, stream_generation) {
             Ok(session) => session,
             Err(error) => {
                 if let Ok(mut inner) = self.inner.lock() {
@@ -284,6 +295,7 @@ impl CaptureService {
                 session: None,
                 last_error: None,
                 callback_drops: Arc::new(AtomicU64::new(0)),
+                stream_generation: 0,
             })),
             backend,
             lifecycle: Arc::new(Mutex::new(())),
@@ -352,6 +364,7 @@ mod tests {
             &self,
             _source: CaptureSource,
             events: std::sync::Arc<dyn CaptureEvents>,
+            _stream_generation: u64,
         ) -> Result<Box<dyn CaptureSession>, CaptureError> {
             let _ = self.entered.send(());
             let _ = self
@@ -371,6 +384,7 @@ mod tests {
             &self,
             _source: CaptureSource,
             events: std::sync::Arc<dyn CaptureEvents>,
+            _stream_generation: u64,
         ) -> Result<Box<dyn CaptureSession>, CaptureError> {
             if self.permission_denied {
                 return Err(CaptureError::PermissionNotGranted {
