@@ -2,6 +2,7 @@
 /apps/mega-desktop/ui/dist/
 /apps/mega-desktop/ui/target/
 /apps/mega-desktop/src-tauri/gen/
+/apps/mega-desktop/src-tauri/PermissionFlow_PermissionFlow.bundle/
 
 # Local environment files can contain credentials.
 .env
