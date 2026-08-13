@@ -1,10 +1,17 @@
 pub mod auth;
 pub mod config;
+pub mod credentials;
+pub mod domain;
 pub mod error;
+pub mod protocol;
+pub mod providers;
+pub mod routes;
+pub mod store;
+pub mod worker;
 
 use std::time::Duration;
 
-use axum::{Extension, Json, Router, middleware, routing::get};
+use axum::{Json, Router, middleware, routing::get};
 use http::{HeaderName, header};
 use serde::Serialize;
 use tower::ServiceBuilder;
@@ -18,9 +25,12 @@ use tower_http::{
 };
 
 use crate::{
-    auth::{AuthState, Principal},
+    auth::AuthState,
     config::Config,
+    credentials::ProviderCredentialVault,
     error::REQUEST_ID_HEADER,
+    providers::ProviderRegistry,
+    store::{InMemoryStore, StoreHandle},
 };
 
 #[derive(Serialize)]
@@ -33,10 +43,16 @@ struct Health {
 pub fn app(config: Config) -> Router {
     let auth_state = AuthState::new(&config.supabase_url)
         .expect("validated Supabase configuration must create an auth client");
-    app_with_auth(auth_state)
+    app_with_store_and_auth(auth_state, std::sync::Arc::new(InMemoryStore::new()))
 }
 
-fn app_with_auth(auth_state: AuthState) -> Router {
+pub fn app_with_store(config: Config, store: StoreHandle) -> Router {
+    let auth_state = AuthState::new(&config.supabase_url)
+        .expect("validated Supabase configuration must create an auth client");
+    app_with_store_and_auth(auth_state, store)
+}
+
+fn app_with_store_and_auth(auth_state: AuthState, store: StoreHandle) -> Router {
     let request_id = HeaderName::from_static(REQUEST_ID_HEADER);
     let middleware = ServiceBuilder::new()
         .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(
@@ -52,26 +68,32 @@ fn app_with_auth(auth_state: AuthState) -> Router {
             Duration::from_secs(30),
         ));
 
-    let protected =
-        Router::new()
-            .route("/me", get(me))
-            .route_layer(middleware::from_fn_with_state(
-                auth_state,
-                auth::require_auth,
-            ));
+    let vault = ProviderCredentialVault::from_env()
+        .ok()
+        .map(std::sync::Arc::new);
+    let canonical = routes::canonical_routes_with_runtime(
+        store.clone(),
+        ProviderRegistry::default(),
+        vault.clone(),
+    )
+    .route_layer(middleware::from_fn_with_state(
+        auth_state.clone(),
+        auth::require_auth,
+    ));
+    let legacy =
+        routes::legacy_routes_with_runtime(store, ProviderRegistry::default(), vault).route_layer(
+            middleware::from_fn_with_state(auth_state, auth::require_auth),
+        );
 
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .nest("/v1", protected)
+        .nest("/v1", canonical)
+        .nest("/api", legacy)
         .fallback(not_found)
         .layer(middleware::from_fn(error::attach_request_id))
         .layer(middleware)
         .layer(middleware::from_fn(error::normalize_problem_response))
-}
-
-async fn me(Extension(principal): Extension<Principal>) -> Json<Principal> {
-    Json(principal)
 }
 
 async fn not_found() -> error::AppError {
@@ -108,6 +130,7 @@ mod tests {
         app(Config {
             bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             supabase_url: Url::parse("https://project.supabase.co").unwrap(),
+            database_url: None,
         })
     }
 
