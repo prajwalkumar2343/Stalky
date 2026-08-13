@@ -25,7 +25,7 @@ The infrastructure output is an internal event stream and diagnostics UI—not a
 
 - **Quiet utility:** the UI stays out of the way and makes system state legible.
 - **Visible capture:** no invisible screen or microphone activity.
-- **Local by default:** raw frames and audio remain in process memory and are not retained.
+- **Local by default:** raw frames are never retained. Audio history is opt-in, local, encrypted, and bounded by retention and byte quotas.
 - **Explicit control:** Accessibility observation is continuous only while enabled; controls are allowlisted, revalidated, visible, and user initiated.
 - **Backpressure everywhere:** slow consumers cannot cause unbounded frame, AX, audio, log, or IPC queues.
 - **Recoverable states:** permission denial, device changes, display changes, process crashes, and sleep/wake are normal state transitions.
@@ -440,7 +440,7 @@ device callback
 - Default ring buffer: 3 seconds.
 - Hold-to-test session maximum: 30 seconds.
 - Buffers are zeroed/released on cancel, permission loss, input change, pause, sleep, and completion.
-- No network transcription and no automatic audio files.
+- No network transcription. History audio is segmented outside the callback and committed only through the authenticated encrypted vault.
 
 ## 14. Permission state machines
 
@@ -467,9 +467,9 @@ Requirements:
 
 ### Default data policy
 
-- Raw frames: memory only.
-- PCM audio: memory only.
-- AX text: memory only unless the user exports an explicit diagnostic snapshot.
+- Raw frames and encoded screenshots/video: transient memory only; on-device OCR may persist only bounded derived text.
+- PCM audio: transient memory only; retained audio exists only as authenticated encrypted vault assets.
+- AX/OCR text: encrypted local timeline storage with app provenance, privacy gates, search, and 30-day default retention.
 - Operational events: local SQLite, metadata only, seven-day rolling retention.
 - Performance metrics: local aggregates, 30-day rolling retention.
 - Content telemetry: disabled.
@@ -704,9 +704,9 @@ Exit gate: no write/action symbols exposed; large and malformed trees remain bou
 
 ### Phase 6 — audio infrastructure (5–7 days)
 
-- Device discovery, PCM callback, ring buffer, normalization, meters, VAD, Hold to Test, device rebuilds, lifecycle integration, and audio diagnostics UI.
+- Device discovery, PCM callback, bounded ingestion, normalization, meters, VAD, encrypted history segmentation, device rebuilds, lifecycle integration, and audio diagnostics UI.
 
-Exit gate: zero callback allocations/blocks, no unexpected persistence, and device matrix passes.
+Exit gate: zero callback allocations/blocks, no plaintext persistence, quota/retention recovery passes, and the device matrix passes.
 
 ### Phase 7 — storage and diagnostics (4–6 days)
 
