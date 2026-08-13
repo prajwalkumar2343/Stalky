@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.stalky.desktop",
   "build": {
-    "beforeDevCommand": "cd ../ui && trunk serve",
+    "beforeDevCommand": "cd ui && env -u NO_COLOR trunk serve",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "cd ../ui && trunk build --release",
+    "beforeBuildCommand": "cd ui && env -u NO_COLOR trunk build --release",
     "frontendDist": "../ui/dist"
   },
   "app": {
@@ -23,6 +23,7 @@
         "center": true,
         "resizable": true,
         "fullscreen": false,
+        "visible": false,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"
       },
@@ -50,7 +51,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'"
+      "csp": null
     }
   },
   "bundle": {
@@ -63,7 +64,8 @@
     "macOS": {
       "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist",
-      "minimumSystemVersion": "15.0"
+      "minimumSystemVersion": "15.0",
+      "signingIdentity": "Stalky Development"
     }
   }
 }
