@@ -93,6 +93,7 @@ impl Drop for MasterSecret {
 #[serde(rename_all = "snake_case")]
 pub enum AudioCodec {
     PcmS16Le,
+    PcmS16LeZstd,
     Opus,
     Aac,
 }
@@ -101,6 +102,7 @@ impl AudioCodec {
     pub(crate) const fn to_byte(self) -> u8 {
         match self {
             Self::PcmS16Le => 1,
+            Self::PcmS16LeZstd => 4,
             Self::Opus => 2,
             Self::Aac => 3,
         }
@@ -109,6 +111,7 @@ impl AudioCodec {
     pub(crate) const fn from_byte(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::PcmS16Le),
+            4 => Some(Self::PcmS16LeZstd),
             2 => Some(Self::Opus),
             3 => Some(Self::Aac),
             _ => None,
@@ -188,6 +191,12 @@ impl AudioChunkMetadata {
 pub struct AudioChunk {
     pub metadata: AudioChunkMetadata,
     pub payload: Vec<u8>,
+}
+
+impl Drop for AudioChunk {
+    fn drop(&mut self) {
+        self.payload.zeroize();
+    }
 }
 
 impl AudioChunk {
