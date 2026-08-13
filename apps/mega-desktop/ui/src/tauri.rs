@@ -422,18 +422,18 @@ pub async fn relaunch_app() -> Result<(), String> {
     invoke("relaunch_app").await
 }
 
+pub async fn main_window_ready() -> Result<(), String> {
+    invoke("main_window_ready").await
+}
+
+/// Requests one protected capability through the native macOS flow: Stalky
+/// enrolls itself with the OS prompt, opens the matching System Settings pane,
+/// and returns the fresh status. The UI poller then watches for the grant
+/// without any relaunch being required.
 pub async fn permission_request(
     capability: PermissionCapability,
 ) -> Result<PermissionStatuses, String> {
     invoke_with("permission_request", &PermissionRequestArgs { capability }).await
-}
-
-pub async fn permission_open_settings(capability: PermissionCapability) -> Result<(), String> {
-    invoke_with(
-        "permission_open_settings",
-        &PermissionRequestArgs { capability },
-    )
-    .await
 }
 
 pub async fn onboarding_state() -> Result<OnboardingState, String> {
