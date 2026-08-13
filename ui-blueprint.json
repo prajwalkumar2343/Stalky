@@ -27,7 +27,7 @@
       },
       {
         "id": "glance",
-        "purpose": "Show capture state and one contextual action without opening the workspace",
+        "purpose": "Show capture state and one contextual action on an adaptive native-glass surface with a decorative GPU highlight layer",
         "placement": "menu-bar-adjacent-transient"
       }
     ]
@@ -92,6 +92,12 @@
     ],
     "hover_only_actions": []
   },
+  "glass_surface": {
+    "composition": "Native macOS background glass below the transparent webview, a noninteractive WebGPU spectral-light shader above it, and semantic controls above both layers.",
+    "fallback": "Use the existing macOS HUD material when native Liquid Glass is unavailable and CSS highlights when WebGPU is unavailable.",
+    "motion": "Pointer position gently changes the highlight direction; capture state increases edge energy without changing layout or obscuring status text.",
+    "privacy": "The shader never receives screen pixels. Background optics are composited by AppKit and do not add another capture stream."
+  },
   "feedback": {
     "acknowledgement_ms": 100,
     "progress_after_ms": 1000,
@@ -127,7 +133,7 @@
       "active and pause",
       "permission denied",
       "capture failure and retry",
-      "glance expand and collapse",
+      "glance idle, running, attention, pointer response, and software fallback",
       "relaunch recovery"
     ]
   }
