@@ -1,5 +1,7 @@
+mod audio;
 mod auth;
 mod cloud;
+mod history;
 mod hud;
 mod memory;
 mod permissions;
@@ -163,12 +165,15 @@ fn permission_statuses(
     capture: State<'_, CaptureService>,
     accessibility: State<'_, AccessibilityService>,
 ) -> PermissionStatuses {
+    // Once the user has explicitly requested Accessibility, the active probe
+    // is allowed and lets a System Settings grant appear without relaunching.
+    let live_accessibility = preferences.has_requested(PermissionCapability::Accessibility);
     refresh_permission_snapshot(
         coordinator.inner(),
         preferences.inner(),
         capture.inner(),
         accessibility.inner(),
-        false,
+        live_accessibility,
     )
 }
 
@@ -226,6 +231,7 @@ fn open_settings_pane(target: PermissionSettingsTarget) -> Result<(), String> {
 
 #[tauri::command]
 async fn permission_request(
+    app: tauri::AppHandle,
     coordinator: State<'_, PermissionCoordinator>,
     preferences: State<'_, PreferenceStore>,
     capture: State<'_, CaptureService>,
@@ -233,9 +239,8 @@ async fn permission_request(
     capability: PermissionSettingsTarget,
 ) -> Result<PermissionStatuses, String> {
     let capability = capability.into();
-    let has_requested = preferences.has_requested(capability);
     coordinator
-        .begin_request(capability, has_requested)
+        .begin_request(capability)
         .map_err(permission_request_message)?;
     if let Err(error) = preferences.record_permission_request(capability) {
         coordinator.mark_request_failed(capability);
@@ -245,32 +250,42 @@ async fn permission_request(
     let coordinator = coordinator.inner().clone();
     let accessibility = accessibility.inner().clone();
     let accessibility_for_request = accessibility.clone();
-    let result = match tauri::async_runtime::spawn_blocking(move || match capability {
-        PermissionCapability::Accessibility => accessibility_for_request
-            .request_permission()
-            .map_err(|error| error.to_string()),
-        PermissionCapability::ScreenRecording => {
-            // Open System Settings first so it sits behind the native modal.
-            // On macOS 15+ the modal layers over Settings; if the user
-            // dismisses it, Settings is already open and they are not stuck.
-            open_settings_pane(PermissionSettingsTarget::ScreenRecording)?;
-            MacOsPlatform::new()
-                .request_permission(capability)
-                .map_err(|error| error.to_string())
-        }
-        PermissionCapability::Microphone => {
-            request_microphone_permission().map_err(|error| error.to_string())
-        }
-        PermissionCapability::LaunchAtLogin => {
-            Err("Launch at login is optional and not available in this build.".to_owned())
-        }
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            coordinator.mark_request_failed(capability);
-            return Err(format!("permission request task failed: {error}"));
+    let result = if capability == PermissionCapability::ScreenRecording {
+        // Open System Settings first so the pane sits behind the native
+        // request: on macOS 15+ the consent sheet layers over Settings, and
+        // if the user dismisses it, Settings is already open and they are
+        // not stuck. The request itself is what enrolls Stalky in the
+        // Screen Recording list.
+        let _ = open_settings_pane(PermissionSettingsTarget::ScreenRecording);
+        enroll_screen_recording_on_main(app).await
+    } else {
+        match tauri::async_runtime::spawn_blocking(move || match capability {
+            PermissionCapability::Accessibility => {
+                // Same pattern as Screen Recording: the native prompt only
+                // appears once per app identity, so the Accessibility pane
+                // is opened first. If the prompt is dismissed (or never
+                // appears again), the user is already in System Settings
+                // and can toggle Stalky's row directly.
+                let _ = open_settings_pane(PermissionSettingsTarget::Accessibility);
+                accessibility_for_request
+                    .request_permission()
+                    .map_err(|error| error.to_string())
+            }
+            PermissionCapability::Microphone => {
+                request_microphone_permission().map_err(|error| error.to_string())
+            }
+            PermissionCapability::ScreenRecording => unreachable!(),
+            PermissionCapability::LaunchAtLogin => {
+                Err("Launch at login is optional and not available in this build.".to_owned())
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                coordinator.mark_request_failed(capability);
+                return Err(format!("permission request task failed: {error}"));
+            }
         }
     };
 
@@ -289,14 +304,33 @@ async fn permission_request(
     ))
 }
 
+/// Runs Stalky's native Screen Recording enrollment from the application main
+/// thread. `CGRequestScreenCaptureAccess` creates Stalky's row in System
+/// Settings → Privacy & Security → Screen Recording and shows the system
+/// prompt; calling it off the main thread can leave the row unregistered.
+async fn enroll_screen_recording_on_main(app: tauri::AppHandle) -> Result<PermissionState, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let result = MacOsPlatform::new()
+            .request_permission(PermissionCapability::ScreenRecording)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("could not schedule the Screen Recording request: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .map_err(|_| "macOS did not finish the Screen Recording request.".to_owned())?
+    })
+    .await
+    .map_err(|error| format!("Screen Recording request task failed: {error}"))?
+}
+
 fn permission_request_message(error: PermissionRequestError) -> String {
     match error {
         PermissionRequestError::AlreadyGranted => "This permission is already granted.".to_owned(),
         PermissionRequestError::AlreadyRequesting => {
             "Stalky is waiting for the current permission request to finish.".to_owned()
-        }
-        PermissionRequestError::OpenSettings => {
-            "This permission was denied earlier. Open System Settings to change it.".to_owned()
         }
         PermissionRequestError::Unsupported => {
             "This capability is unavailable in this build.".to_owned()
@@ -425,6 +459,20 @@ fn relaunch_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Reveals the workspace only after the bundled WASM has mounted. This keeps
+/// WKWebView's unpainted startup surface from appearing as a blank app window.
+#[tauri::command]
+fn main_window_ready(app: tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The Stalky workspace is unavailable.".to_owned())?;
+    main.show()
+        .map_err(|error| format!("could not show Stalky: {error}"))?;
+    let _ = main.unminimize();
+    main.set_focus()
+        .map_err(|error| format!("could not focus Stalky: {error}"))
+}
+
 #[tauri::command]
 fn onboarding_complete(
     preferences: State<'_, PreferenceStore>,
@@ -514,7 +562,22 @@ pub fn run() {
             app.manage(hud_state);
             app.manage(preferences);
             app.manage(PermissionCoordinator::new());
-            app.manage(memory::MemoryService::initialize(app.handle()));
+            let memory = memory::MemoryService::initialize(app.handle());
+            let audio = audio::AudioVaultService::initialize(app.handle());
+            let audio_history =
+                audio::AudioHistoryService::initialize(audio.clone(), memory.clone())
+                    .map_err(std::io::Error::other)?;
+            let history = history::HistoryService::start(
+                memory.clone(),
+                audio.clone(),
+                app.state::<CaptureService>().inner().clone(),
+                app.state::<AccessibilityService>().inner().clone(),
+            )
+            .map_err(std::io::Error::other)?;
+            app.manage(memory);
+            app.manage(audio);
+            app.manage(audio_history);
+            app.manage(history);
             Ok(())
         })
         .manage(CaptureService::new())
@@ -548,7 +611,7 @@ pub fn run() {
                     preferences.inner(),
                     capture.inner(),
                     accessibility.inner(),
-                    false,
+                    preferences.has_requested(PermissionCapability::Accessibility),
                 );
             }
         })
@@ -559,6 +622,7 @@ pub fn run() {
             permission_request,
             permission_open_settings,
             relaunch_app,
+            main_window_ready,
             capture_start,
             capture_stop,
             capture_status,
@@ -581,6 +645,13 @@ pub fn run() {
             memory::memory_reject,
             memory::memory_context,
             memory::memory_delete,
+            history::history_status,
+            history::history_search,
+            history::history_delete,
+            audio::audio_vault_status,
+            audio::audio_history_start,
+            audio::audio_history_stop,
+            audio::audio_history_status,
             hud::hud_set_presentation,
             hud::hud_open_main
         ])
