@@ -1,10 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use mega_permissions::{
-    PermissionCapability, PermissionRegistry, PermissionRequestDecision, PermissionState,
-    permission_request_decision,
-};
+use mega_permissions::{PermissionCapability, PermissionRegistry, PermissionState};
 use thiserror::Error;
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -13,8 +10,6 @@ pub enum PermissionRequestError {
     AlreadyGranted,
     #[error("permission request is already in flight")]
     AlreadyRequesting,
-    #[error("permission recovery must be completed in System Settings")]
-    OpenSettings,
     #[error("permission is unsupported in this build")]
     Unsupported,
     #[error("permission state transition failed: {0}")]
@@ -63,6 +58,16 @@ impl PermissionCoordinator {
 
     pub fn observe(&self, capability: PermissionCapability, state: PermissionState) {
         if let Ok(mut inner) = self.state.lock() {
+            // A successful Screen Recording request may not affect Apple's
+            // public preflight result until the process relaunches. Preserve
+            // that actionable state instead of letting the next passive poll
+            // regress it to Denied. A fresh coordinator is created on launch.
+            if capability == PermissionCapability::ScreenRecording
+                && state == PermissionState::Denied
+                && inner.registry.state(capability) == PermissionState::RestartRequired
+            {
+                return;
+            }
             let _ = inner.registry.observe(capability, state);
         }
     }
@@ -83,7 +88,6 @@ impl PermissionCoordinator {
     pub fn begin_request(
         &self,
         capability: PermissionCapability,
-        has_requested: bool,
     ) -> Result<(), PermissionRequestError> {
         let mut inner = self
             .state
@@ -92,8 +96,11 @@ impl PermissionCoordinator {
         if inner.in_flight.contains(&capability) {
             return Err(PermissionRequestError::AlreadyRequesting);
         }
-        match permission_request_decision(inner.registry.state(capability), has_requested) {
-            PermissionRequestDecision::Request => {
+        match inner.registry.state(capability) {
+            PermissionState::Granted => Err(PermissionRequestError::AlreadyGranted),
+            PermissionState::Requesting => Err(PermissionRequestError::AlreadyRequesting),
+            PermissionState::Unsupported => Err(PermissionRequestError::Unsupported),
+            _ => {
                 inner
                     .registry
                     .begin_request(capability)
@@ -101,14 +108,6 @@ impl PermissionCoordinator {
                 inner.in_flight.insert(capability);
                 Ok(())
             }
-            PermissionRequestDecision::AlreadyGranted => {
-                Err(PermissionRequestError::AlreadyGranted)
-            }
-            PermissionRequestDecision::AlreadyRequesting => {
-                Err(PermissionRequestError::AlreadyRequesting)
-            }
-            PermissionRequestDecision::OpenSettings => Err(PermissionRequestError::OpenSettings),
-            PermissionRequestDecision::Unsupported => Err(PermissionRequestError::Unsupported),
         }
     }
 
@@ -137,16 +136,13 @@ mod tests {
         let coordinator = PermissionCoordinator::new();
         let capability = PermissionCapability::Accessibility;
         coordinator.observe(capability, PermissionState::NotRequested);
-        coordinator.begin_request(capability, false).unwrap();
+        coordinator.begin_request(capability).unwrap();
         assert_eq!(
-            coordinator.begin_request(capability, false),
+            coordinator.begin_request(capability),
             Err(PermissionRequestError::AlreadyRequesting)
         );
         coordinator.finish_request(capability, PermissionState::Denied);
-        assert_eq!(
-            coordinator.begin_request(capability, true),
-            Err(PermissionRequestError::OpenSettings)
-        );
+        coordinator.begin_request(capability).unwrap();
     }
 
     #[test]
@@ -155,8 +151,21 @@ mod tests {
         let capability = PermissionCapability::Microphone;
         coordinator.observe(capability, PermissionState::Granted);
         assert_eq!(
-            coordinator.begin_request(capability, false),
+            coordinator.begin_request(capability),
             Err(PermissionRequestError::AlreadyGranted)
+        );
+    }
+
+    #[test]
+    fn screen_grant_waiting_for_relaunch_is_not_lost_to_cached_preflight() {
+        let coordinator = PermissionCoordinator::new();
+        let capability = PermissionCapability::ScreenRecording;
+        coordinator.observe(capability, PermissionState::RestartRequired);
+        coordinator.observe(capability, PermissionState::Denied);
+
+        assert_eq!(
+            coordinator.snapshot().get(&capability),
+            Some(&PermissionState::RestartRequired)
         );
     }
 }
