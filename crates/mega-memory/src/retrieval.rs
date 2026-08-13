@@ -92,6 +92,9 @@ fn eligible(
     ) {
         return false;
     }
+    if memory.memory_type == crate::MemoryType::Episode && !request.temporal_query {
+        return false;
+    }
     if !request.sensitivity_allowance.allows(memory.sensitivity) {
         return false;
     }
@@ -134,15 +137,16 @@ fn score(
         _ => 0.0,
     };
     let freshness = if memory.memory_type.freshness_sensitive() {
-        candidate.signals.freshness.clamp(0.0, 1.0)
+        unit_signal(candidate.signals.freshness)
     } else {
         1.0
     };
-    let trust = f32::from(memory.assertion_mode.trust_rank()) / 5.0 * memory.confidence;
-    let blended = 0.40 * candidate.signals.semantic_similarity.clamp(0.0, 1.0)
-        + 0.20 * candidate.signals.fts_relevance.clamp(0.0, 1.0)
+    let trust =
+        f32::from(memory.assertion_mode.trust_rank()) / 5.0 * unit_signal(memory.confidence);
+    let blended = 0.40 * unit_signal(candidate.signals.semantic_similarity)
+        + 0.20 * unit_signal(candidate.signals.fts_relevance)
         + 0.15 * scope_match
-        + 0.10 * memory.importance
+        + 0.10 * unit_signal(memory.importance)
         + 0.10 * trust
         + 0.05 * freshness;
 
@@ -167,6 +171,14 @@ fn score(
         + if app_match { 2.0 } else { 0.0 }
         + if entity_match { 1.0 } else { 0.0 }
         + if high_trust { 0.5 } else { 0.0 }
+}
+
+fn unit_signal(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 pub fn render_memory_context(request: &MemoryContextRequest, ranked: &[RetrievedMemory]) -> String {
@@ -381,6 +393,27 @@ mod tests {
             rank_memories(&request, [figma, wrong_app, wrong_project]).len(),
             1
         );
+    }
+
+    #[test]
+    fn episodes_are_reserved_for_temporal_queries_and_invalid_signals_degrade_safely() {
+        let mut episode = retrieved("episode", ScopeType::Global, "global", "Met Alice");
+        episode.memory.memory_type = MemoryType::Episode;
+        episode.signals.semantic_similarity = f32::NAN;
+        episode.signals.fts_relevance = f32::INFINITY;
+        episode.signals.freshness = f32::NEG_INFINITY;
+
+        assert!(rank_memories(&MemoryContextRequest::default(), [episode.clone()]).is_empty());
+
+        let ranked = rank_memories(
+            &MemoryContextRequest {
+                temporal_query: true,
+                ..Default::default()
+            },
+            [episode],
+        );
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].score.is_finite());
     }
 
     #[test]

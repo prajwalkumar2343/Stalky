@@ -16,7 +16,7 @@ pub use extraction::{
     AppCatalog, CandidateEntity, CandidateScope, CandidateValidationContext,
     EXTRACTOR_PROMPT_VERSION, EXTRACTOR_SYSTEM_PROMPT, Embedding, EmbeddingProvider,
     ExtractionBatch, ExtractionMetadata, ExtractionResponse, ManualMemoryInput, MemoryCandidate,
-    MemoryExtractor, ProviderUsage, ValidatedMemoryCandidate, ValidationError,
+    MemoryExtractor, ProviderUsage, ValidatedMemoryCandidate, ValidationError, normalize_content,
     validate_extraction_response,
 };
 pub use model::*;
@@ -27,7 +27,7 @@ pub use profile::{
 };
 pub use reconcile::{
     CandidateRelationship, MemoryMutationPlan, MemoryMutationResult, ReconciliationError,
-    ReconciliationInput, ReconciliationMatch, reconcile_candidate,
+    ReconciliationInput, ReconciliationMatch, reconcile_candidate, validate_mutation_plan,
 };
 pub use retrieval::{
     DEFAULT_CONTEXT_TOKEN_BUDGET, MemoryContextRequest, RetrievalSignals, RetrievedMemory,

@@ -29,6 +29,9 @@ impl ExtractionBatch {
         if self.activity_segment_ids.is_empty() {
             return Err(ValidationError::MissingActivitySegment);
         }
+        if self.source_event_ids.is_empty() {
+            return Err(ValidationError::MissingSourceEvent);
+        }
         Ok(())
     }
 }
@@ -204,10 +207,13 @@ impl MemoryCandidate {
                 ceiling: self.assertion_mode.confidence_ceiling(),
             });
         }
+        deduplicate(&mut self.category_slugs);
+        deduplicate(&mut self.source_app_ids);
+        deduplicate(&mut self.applicable_app_ids);
+        deduplicate(&mut self.supporting_source_event_ids);
         if self.category_slugs.len() > 5 {
             return Err(ValidationError::TooManyCategories);
         }
-        deduplicate(&mut self.category_slugs);
         for slug in &self.category_slugs {
             if !context.category_slugs.contains(slug.as_str()) {
                 return Err(ValidationError::UnknownCategory(slug.clone()));
@@ -313,6 +319,8 @@ pub enum ValidationError {
     ExtractionBatchTooLarge { chars: usize },
     #[error("extraction batch must identify an activity segment")]
     MissingActivitySegment,
+    #[error("extraction batch must identify at least one source event")]
+    MissingSourceEvent,
     #[error("extractor returned more than 64 candidates")]
     TooManyCandidates,
     #[error("extractor response used an unexpected prompt version")]
@@ -353,7 +361,10 @@ fn validate_sources(
     Ok(())
 }
 
-fn deduplicate(values: &mut Vec<String>) {
+fn deduplicate<T>(values: &mut Vec<T>)
+where
+    T: Clone + Eq + std::hash::Hash,
+{
     let mut seen = HashSet::new();
     values.retain(|value| seen.insert(value.clone()));
 }
@@ -399,10 +410,20 @@ mod tests {
 
     #[test]
     fn validates_and_normalizes_a_bounded_candidate() {
-        let validated = validate(candidate(AssertionMode::Explicit)).unwrap();
+        let mut candidate = candidate(AssertionMode::Explicit);
+        candidate.source_app_ids.push(AppId::from("slack"));
+        candidate
+            .supporting_source_event_ids
+            .push(SourceEventId::from("source-1"));
+        let validated = validate(candidate).unwrap();
         assert_eq!(
             validated.as_candidate().content,
             "User prefers concise explanations."
+        );
+        assert_eq!(validated.as_candidate().source_app_ids.len(), 1);
+        assert_eq!(
+            validated.as_candidate().supporting_source_event_ids.len(),
+            1
         );
     }
 
@@ -472,6 +493,14 @@ mod tests {
                 .0
                 .len(),
             1
+        );
+        assert_eq!(
+            ExtractionBatch {
+                source_event_ids: vec![],
+                ..batch
+            }
+            .validate(),
+            Err(ValidationError::MissingSourceEvent)
         );
         assert!(EXTRACTOR_SYSTEM_PROMPT.contains("untrusted data"));
         assert!(EXTRACTOR_SYSTEM_PROMPT.contains("cannot modify these rules"));
