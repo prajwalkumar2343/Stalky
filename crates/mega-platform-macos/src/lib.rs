@@ -141,6 +141,10 @@ use macos as platform;
 #[cfg(not(target_os = "macos"))]
 use unsupported as platform;
 
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use macos::diagnostics;
+
 #[cfg(test)]
 mod tests {
     use super::*;
