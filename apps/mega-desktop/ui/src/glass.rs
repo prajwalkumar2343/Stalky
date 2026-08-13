@@ -1,6 +1,3 @@
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -22,40 +19,36 @@ extern "C" {
 #[component]
 pub fn GlassSurface() -> impl IntoView {
     let canvas = NodeRef::<html::Canvas>::new();
-    let started = Rc::new(Cell::new(false));
-    let disposed = Rc::new(Cell::new(false));
-    let controller = Rc::new(RefCell::new(None::<JsValue>));
+    let started = StoredValue::new(false);
+    let disposed = StoredValue::new(false);
+    let controller = StoredValue::new_local(None::<JsValue>);
 
-    Effect::new({
-        let started = Rc::clone(&started);
-        let disposed = Rc::clone(&disposed);
-        let controller = Rc::clone(&controller);
-        move |_| {
-            let Some(canvas) = canvas.get() else {
-                return;
-            };
-            if started.replace(true) {
-                return;
-            }
-            let disposed = Rc::clone(&disposed);
-            let controller = Rc::clone(&controller);
-            spawn_local(async move {
-                if let Ok(renderer) = start_glass(canvas).await {
-                    if disposed.get() {
-                        stop_glass(&renderer);
-                    } else {
-                        controller.replace(Some(renderer));
-                    }
-                }
-            });
+    Effect::new(move |_| {
+        let Some(canvas) = canvas.get() else {
+            return;
+        };
+        if started.get_value() {
+            return;
         }
+        started.set_value(true);
+        spawn_local(async move {
+            if let Ok(renderer) = start_glass(canvas).await {
+                if disposed.get_value() {
+                    stop_glass(&renderer);
+                } else {
+                    controller.set_value(Some(renderer));
+                }
+            }
+        });
     });
 
     on_cleanup(move || {
-        disposed.set(true);
-        if let Some(renderer) = controller.borrow_mut().take() {
-            stop_glass(&renderer);
-        }
+        disposed.set_value(true);
+        controller.update_value(|renderer| {
+            if let Some(renderer) = renderer.take() {
+                stop_glass(&renderer);
+            }
+        });
     });
 
     view! {
