@@ -1,6 +1,12 @@
 use std::io;
 
-use stalky_backend::{app, config::Config};
+use std::sync::Arc;
+
+use stalky_backend::{
+    app_with_store,
+    config::Config,
+    store::{InMemoryStore, PostgresStore, StoreHandle},
+};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -14,8 +20,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     let bind_address = config.bind_address;
     let listener = TcpListener::bind(bind_address).await?;
+    let store: StoreHandle = if let Some(database_url) = config.database_url.as_deref() {
+        Arc::new(PostgresStore::connect(database_url).await?)
+    } else {
+        tracing::warn!("DATABASE_URL is not configured; using process-local in-memory persistence");
+        Arc::new(InMemoryStore::new())
+    };
     tracing::info!(%bind_address, "stalky backend listening");
-    axum::serve(listener, app(config))
+    axum::serve(listener, app_with_store(config, store))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
