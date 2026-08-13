@@ -6,6 +6,11 @@ publish.workspace = true
 
 [dependencies]
 mega-core.workspace = true
+mega-memory.workspace = true
+mega-store.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
