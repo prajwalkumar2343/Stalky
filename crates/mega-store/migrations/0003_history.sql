@@ -4,7 +4,7 @@ CREATE TABLE timeline_entries (
     idempotency_key TEXT NOT NULL UNIQUE,
     media_kind TEXT NOT NULL CHECK (media_kind IN ('text', 'audio')),
     source_kind TEXT NOT NULL CHECK (source_kind IN (
-        'accessibility', 'ocr', 'audio_transcript', 'assistant_conversation',
+        'accessibility', 'ocr', 'audio_capture', 'audio_transcript', 'assistant_conversation',
         'manual', 'structured_import'
     )),
     bundle_identifier TEXT,

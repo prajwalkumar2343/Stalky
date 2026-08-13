@@ -25,6 +25,7 @@ pub type HistorySourceKind = TimelineSourceKind;
 pub enum TimelineSourceKind {
     Accessibility,
     Ocr,
+    AudioCapture,
     AudioTranscript,
     AssistantConversation,
     Manual,
@@ -36,6 +37,7 @@ impl TimelineSourceKind {
         match self {
             Self::Accessibility => "accessibility",
             Self::Ocr => "ocr",
+            Self::AudioCapture => "audio_capture",
             Self::AudioTranscript => "audio_transcript",
             Self::AssistantConversation => "assistant_conversation",
             Self::Manual => "manual",
@@ -47,6 +49,7 @@ impl TimelineSourceKind {
         match value {
             "accessibility" => Ok(Self::Accessibility),
             "ocr" => Ok(Self::Ocr),
+            "audio_capture" => Ok(Self::AudioCapture),
             "audio_transcript" => Ok(Self::AudioTranscript),
             "assistant_conversation" => Ok(Self::AssistantConversation),
             "manual" => Ok(Self::Manual),
