@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde::Serialize;
 
-use crate::{CaptureError, CaptureSource, FrameIngest, FrameInput, FrameMetrics};
+use crate::{CaptureError, CaptureSource, FrameIngest, FrameInput, FrameMetrics, OcrObservation};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +21,7 @@ pub struct CaptureStatus {
     pub state: CaptureState,
     pub source: Option<CaptureSource>,
     pub metrics: FrameMetrics,
+    pub latest_ocr: Option<OcrObservation>,
     pub last_error: Option<String>,
 }
 
@@ -48,6 +49,7 @@ struct ServiceInner {
     state: CaptureState,
     source: Option<CaptureSource>,
     metrics: FrameIngest,
+    latest_ocr: Option<OcrObservation>,
     session: Option<Box<dyn CaptureSession>>,
     last_error: Option<String>,
     callback_drops: Arc<AtomicU64>,
@@ -57,6 +59,7 @@ struct ServiceInner {
 struct ServiceEvents {
     inner: Weak<Mutex<ServiceInner>>,
     callback_drops: Arc<AtomicU64>,
+    ocr: Arc<dyn crate::ocr::FrameOcr>,
 }
 
 impl CaptureEvents for ServiceEvents {
@@ -81,6 +84,7 @@ impl CaptureEvents for ServiceEvents {
     }
 
     fn ingest_owned(&self, frame: crate::BgraFrame) {
+        let ocr = self.ocr.recognize(&frame);
         let Some(inner_mutex) = self.inner.upgrade() else {
             self.record_drop();
             return;
@@ -93,8 +97,13 @@ impl CaptureEvents for ServiceEvents {
             self.record_drop();
             return;
         }
-        if let Err(error) = inner.metrics.ingest_owned(frame) {
-            inner.last_error = Some(bounded_diagnostic(error.to_string()));
+        match inner.metrics.ingest_owned(frame) {
+            Ok(admission) if !matches!(admission, crate::FrameAdmission::Duplicate) => match ocr {
+                Ok(observation) => inner.latest_ocr = observation,
+                Err(error) => inner.last_error = Some(bounded_diagnostic(error)),
+            },
+            Ok(_) => {}
+            Err(error) => inner.last_error = Some(bounded_diagnostic(error.to_string())),
         }
     }
 
@@ -122,6 +131,7 @@ pub struct CaptureService {
     inner: Arc<Mutex<ServiceInner>>,
     backend: Arc<dyn CaptureBackend>,
     lifecycle: Arc<Mutex<()>>,
+    ocr: Arc<dyn crate::ocr::FrameOcr>,
 }
 
 impl Clone for CaptureService {
@@ -130,6 +140,7 @@ impl Clone for CaptureService {
             inner: Arc::clone(&self.inner),
             backend: Arc::clone(&self.backend),
             lifecycle: Arc::clone(&self.lifecycle),
+            ocr: Arc::clone(&self.ocr),
         }
     }
 }
@@ -153,6 +164,7 @@ impl CaptureService {
                 state: CaptureState::Stopped,
                 source: None,
                 metrics: FrameIngest::new(),
+                latest_ocr: None,
                 session: None,
                 last_error: None,
                 callback_drops: Arc::new(AtomicU64::new(0)),
@@ -160,6 +172,7 @@ impl CaptureService {
             })),
             backend: Arc::new(crate::platform_backend()),
             lifecycle: Arc::new(Mutex::new(())),
+            ocr: Arc::new(crate::ocr::platform_ocr()),
         }
     }
 
@@ -197,6 +210,7 @@ impl CaptureService {
         let events = Arc::new(ServiceEvents {
             inner: Arc::downgrade(&self.inner),
             callback_drops,
+            ocr: Arc::clone(&self.ocr),
         });
 
         let stream_generation = self
@@ -262,6 +276,7 @@ impl CaptureService {
                 state: CaptureState::Failed,
             })?;
         inner.metrics.clear_latest();
+        inner.latest_ocr = None;
         inner.source = None;
         inner.state = if stop_result.is_ok() {
             CaptureState::Stopped
@@ -292,6 +307,7 @@ impl CaptureService {
                 state: CaptureState::Stopped,
                 source: None,
                 metrics: FrameIngest::new(),
+                latest_ocr: None,
                 session: None,
                 last_error: None,
                 callback_drops: Arc::new(AtomicU64::new(0)),
@@ -299,6 +315,7 @@ impl CaptureService {
             })),
             backend,
             lifecycle: Arc::new(Mutex::new(())),
+            ocr: Arc::new(crate::ocr::platform_ocr()),
         }
     }
 }
@@ -312,6 +329,7 @@ fn status_from_inner(inner: &ServiceInner) -> CaptureStatus {
         state: inner.state,
         source: inner.source,
         metrics,
+        latest_ocr: inner.latest_ocr.clone(),
         last_error: inner.last_error.clone(),
     }
 }
@@ -444,6 +462,7 @@ mod tests {
         let events = super::ServiceEvents {
             inner: std::sync::Arc::downgrade(&service.inner),
             callback_drops: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            ocr: std::sync::Arc::clone(&service.ocr),
         };
         let data = [1; 16];
         events.ingest(FrameInput {
